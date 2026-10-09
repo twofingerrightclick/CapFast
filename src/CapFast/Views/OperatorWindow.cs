@@ -63,7 +63,7 @@ public sealed class SettingsWindow : Window
         _readingSpeed.Value = controller.Settings.ReadingWordsPerMinute;
         _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
         _googlePanel = new StackPanel { Spacing = 8, Children = { Label("Google caption mode"), _googleMode,
-            new TextBlock { Text = "Two-stage mode translates completed speech segments. Live transcription sessions last up to 10 minutes; restart when the session ends.",
+            new TextBlock { Text = "Two-stage mode translates stable Swahili fragments into English. Live transcription sessions last up to 10 minutes; restart when the session ends.",
                 TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 }, Label("Gemini API key"), _gemini } };
         _azurePanel = new StackPanel { Spacing = 8, Children = { Label("Azure Speech key"), _azure,
             Label("Azure region"), _region, Label("Swahili locale"), _locale, _stabilize } };

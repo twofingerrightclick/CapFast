@@ -9,6 +9,7 @@
     <Compile Include="../../src/CapFast/Core/CaptionBuffer.cs" Link="CaptionBuffer.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionLineLayout.cs" Link="CaptionLineLayout.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionPresentation.cs" Link="CaptionPresentation.cs" />
+    <Compile Include="../../src/CapFast/Core/CaptionWordReveal.cs" Link="CaptionWordReveal.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionSequence.cs" Link="CaptionSequence.cs" />
     <Compile Include="../../src/CapFast/Core/GeminiTranscript.cs" Link="GeminiTranscript.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionSettings.cs" Link="CaptionSettings.cs" />
@@ -20,6 +21,7 @@
     <Compile Include="../../src/CapFast/Speech/GeminiCaptionSession.cs" Link="GeminiCaptionSession.cs" />
     <Compile Include="../../src/CapFast/Core/GoogleCaptionMode.cs" Link="GoogleCaptionMode.cs" />
     <Compile Include="../../src/CapFast/Core/GeminiInputTranscript.cs" Link="GeminiInputTranscript.cs" />
+    <Compile Include="../../src/CapFast/Core/StreamingSourceSegmenter.cs" Link="StreamingSourceSegmenter.cs" />
     <Compile Include="../../src/CapFast/Speech/GoogleLiveProtocol.cs" Link="GoogleLiveProtocol.cs" />
     <Compile Include="../../src/CapFast/Speech/FlashTextTranslator.cs" Link="FlashTextTranslator.cs" />
     <Compile Include="../../src/CapFast/Speech/SourceTranslationPipeline.cs" Link="SourceTranslationPipeline.cs" />

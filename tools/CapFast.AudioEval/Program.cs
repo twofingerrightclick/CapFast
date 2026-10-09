@@ -40,8 +40,8 @@ internal static class Program
             var clips = manifest.RootElement.GetProperty("clips").EnumerateArray()
                 .Where(clip => clipId is null || clip.GetProperty("id").ToString() == clipId).Take(limit).ToArray();
             if (clips.Length == 0) throw new SafeError("Clip ID is not present in the pack.");
-            var key = run ? new LocalConfiguration(Path.Combine(root, ".env")).GoogleKey.Trim() : "";
-            if (run && key.Length == 0) throw new SafeError("No Google API key is configured in the environment or project .env.");
+            var key = run ? new LocalConfiguration().GoogleKey.Trim() : "";
+            if (run && key.Length == 0) throw new SafeError("No Google API key is configured in the environment or local API file.");
             Directory.CreateDirectory(output);
             var reports = new List<object>();
             var failures = false;
@@ -151,9 +151,10 @@ internal static class Program
             var translation = await translator.TranslateAsync(source, token);
             report.Translations.Add(new TranslationEvent(source.Replace(key, "[REDACTED]"), translation, start, watch.Elapsed.TotalSeconds, currentBatchSize));
             return translation;
-        }, lifetime.Token);
+        }, lifetime.Token, coalesceWindow: TimeSpan.Zero);
         if (pipeline is not null)
         {
+            pipeline.SourceAccepted += _ => Interlocked.Increment(ref acceptedSources);
             pipeline.BatchStarted += sources => currentBatchSize = sources.Count;
             pipeline.Caption += update => { finals.Add(update.Text); Interlocked.Add(ref completedCaptions, currentBatchSize); };
             pipeline.Failed += message => { report.Error = message; report.StopProvider = true; lifetime.Cancel(); };
@@ -254,8 +255,7 @@ internal static class Program
                     {
                         if (pipeline is not null)
                         {
-                            if (!pipeline.TryEnqueue(update)) throw new SafeError("Translation queue could not keep up with speech.");
-                            if (update.IsFinal) Interlocked.Increment(ref acceptedSources);
+                            if (!pipeline.TryAcceptTranscript(update, watch.Elapsed.TotalSeconds)) throw new SafeError("Translation queue could not keep up with speech.");
                             continue;
                         }
                         var safeText = update.Text.Replace(key, "[REDACTED]");

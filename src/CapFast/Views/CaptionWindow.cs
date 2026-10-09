@@ -1,10 +1,12 @@
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Controls.Templates;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Controls.Documents;
 using Avalonia.Threading;
 using CapFast.Core;
 using CapFast.Speech;
@@ -21,6 +23,8 @@ public sealed class CaptionWindow : Window
     private readonly Canvas _captionCanvas = new() { ClipToBounds = true };
     private readonly System.Diagnostics.Stopwatch _presentationClock = System.Diagnostics.Stopwatch.StartNew();
     private readonly List<TextBlock> _rowLabels = new();
+    private readonly CaptionWordReveal _wordReveal = new();
+    private readonly List<(CaptionWordReveal.Word Word, SolidColorBrush Brush)> _wordBrushes = new();
     private readonly DispatcherTimer _scrollTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private readonly System.Diagnostics.Stopwatch _scrollClock = new();
     private string[] _visibleLines = Array.Empty<string>();
@@ -28,6 +32,7 @@ public sealed class CaptionWindow : Window
     private string _geometry = "";
     private int _scrollRows;
     private int _presentationGeneration;
+    private bool _waitingForReveal;
     private readonly Grid _stage;
     private readonly Border _band;
     private readonly StackPanel _pausedControls;
@@ -107,7 +112,7 @@ public sealed class CaptionWindow : Window
         _controller.CanAcceptCaptions = () => _presentation.CanAcceptCaptions;
         Closed += (_, _) => { _controller.Changed -= Refresh; _controller.CaptionReceived -= ReceiveCaption;
             _controller.CaptionsCleared -= ClearCaption; _controller.CanAcceptCaptions = null;
-            _scrollTimer.Stop(); _presentation.Clear(); };
+            _scrollTimer.Stop(); _presentation.Clear(); _wordReveal.Clear(); _wordBrushes.Clear(); };
         Closing += async (_, e) =>
         {
             if (_allowClose) return;
@@ -188,7 +193,7 @@ public sealed class CaptionWindow : Window
 
     private void ClearCaption()
     {
-        _presentation.Clear(); _scrollTarget = null; _scrollTimer.Stop();
+        _presentation.Clear(); _scrollTarget = null; _waitingForReveal = false; _scrollTimer.Stop(); _wordReveal.Clear();
         _presentationGeneration = _presentation.Generation;
         ShowRows(Array.Empty<string>());
     }
@@ -213,8 +218,8 @@ public sealed class CaptionWindow : Window
         if (_geometry != geometry || _presentationGeneration != _presentation.Generation)
         {
             _geometry = geometry; _presentationGeneration = _presentation.Generation;
-            _scrollTarget = null;
-            ShowRows(_presentation.CurrentLines.ToArray());
+            _scrollTarget = null; _waitingForReveal = false;
+            ShowRows(_presentation.CurrentLines.ToArray(), revealNewWords: false);
         }
         StartNextFrame();
     }
@@ -222,17 +227,24 @@ public sealed class CaptionWindow : Window
     private void StartNextFrame()
     {
         if (_scrollTarget is not null) return;
-        if (!_presentation.TryPresent(_presentationClock.Elapsed.TotalSeconds, out var frame))
+        var now = _presentationClock.Elapsed.TotalSeconds;
+        if (_waitingForReveal)
+        {
+            if (_wordReveal.IsAnimating(now)) { _scrollTimer.Start(); return; }
+            _waitingForReveal = false;
+            _presentation.Presented(now);
+        }
+        if (!_presentation.TryPresent(now, out var frame))
         {
             if (_presentation.PendingPhrases > 0) _scrollTimer.Start();
-            else _scrollTimer.Stop();
+            else if (!_wordReveal.IsAnimating(_presentationClock.Elapsed.TotalSeconds)) _scrollTimer.Stop();
             return;
         }
         var target = frame!.Lines.ToArray();
         if (frame.ScrollRows == 0)
         {
             ShowRows(target);
-            _presentation.Presented(_presentationClock.Elapsed.TotalSeconds);
+            _waitingForReveal = true;
             _scrollTimer.Start();
             return;
         }
@@ -244,6 +256,8 @@ public sealed class CaptionWindow : Window
 
     private void AnimateScroll()
     {
+        var now = _presentationClock.Elapsed.TotalSeconds;
+        foreach (var (word, brush) in _wordBrushes) brush.Opacity = word.Opacity(now);
         if (_scrollTarget is null) { StartNextFrame(); return; }
         var progress = Math.Clamp(_scrollClock.Elapsed.TotalMilliseconds / 300, 0, 1);
         var eased = progress * progress * (3 - 2 * progress);
@@ -254,25 +268,36 @@ public sealed class CaptionWindow : Window
         }
         if (progress < 1) return;
         var target = _scrollTarget; _scrollTarget = null;
-        ShowRows(target);
-        _presentation.Presented(_presentationClock.Elapsed.TotalSeconds);
+        _wordReveal.RemoveLeadingRows(_scrollRows);
+        _visibleLines = target;
+        DrawRows(target, preserveReveal: true);
+        _waitingForReveal = true;
         StartNextFrame();
     }
 
-    private void ShowRows(string[] lines)
+    private void ShowRows(string[] lines, bool revealNewWords = true)
     {
         _visibleLines = lines;
-        DrawRows(lines);
+        DrawRows(lines, revealNewWords: revealNewWords);
     }
 
-    private void DrawRows(string[] lines)
+    private void DrawRows(string[] lines, bool preserveReveal = false, bool revealNewWords = true)
     {
-        _captionCanvas.Children.Clear(); _rowLabels.Clear();
+        var now = _presentationClock.Elapsed.TotalSeconds;
+        if (!preserveReveal) _wordReveal.Update(lines, now, revealNewWords);
+        _captionCanvas.Children.Clear(); _rowLabels.Clear(); _wordBrushes.Clear();
         for (var index = 0; index < lines.Length; index++)
         {
-            var label = new TextBlock { Text = lines[index], Foreground = Brushes.White,
+            var label = new TextBlock { Foreground = Brushes.White,
                 FontSize = _text.FontSize, FontFamily = _text.FontFamily, FontWeight = _text.FontWeight,
                 LineHeight = _text.LineHeight, Height = _text.LineHeight, TextWrapping = TextWrapping.NoWrap };
+            AutomationProperties.SetName(label, lines[index]);
+            foreach (var word in _wordReveal.Rows[index])
+            {
+                var brush = new SolidColorBrush(Colors.White, word.Opacity(now));
+                label.Inlines!.Add(new Run(word.Text) { Foreground = brush });
+                _wordBrushes.Add((word, brush));
+            }
             Canvas.SetTop(label, index * _text.LineHeight);
             _captionCanvas.Children.Add(label); _rowLabels.Add(label);
         }

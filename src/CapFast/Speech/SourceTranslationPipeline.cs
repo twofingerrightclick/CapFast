@@ -14,10 +14,12 @@ public sealed class SourceTranslationPipeline : IAsyncDisposable
     private readonly object _gate = new();
     private readonly HashSet<string> _accepted = new();
     private readonly Queue<string> _recent = new();
+    private readonly StreamingSourceSegmenter _sourceSegments = new();
     private bool _disposed;
     public event Action<CaptionUpdate>? Caption;
     public event Action<string>? Failed;
     public event Action<IReadOnlyList<CaptionUpdate>>? BatchStarted;
+    public event Action<CaptionUpdate>? SourceAccepted;
     public Task Completion { get; }
 
     public SourceTranslationPipeline(Func<string, CancellationToken, Task<string>> translate,
@@ -43,6 +45,18 @@ public sealed class SourceTranslationPipeline : IAsyncDisposable
             _accepted.Add(source.UtteranceId);
             _recent.Enqueue(source.UtteranceId);
             if (_recent.Count > 256) _accepted.Remove(_recent.Dequeue());
+            SourceAccepted?.Invoke(source);
+            return true;
+        }
+    }
+
+    public bool TryAcceptTranscript(CaptionUpdate source, double nowSeconds)
+    {
+        lock (_gate)
+        {
+            if (_disposed || _lifetime.IsCancellationRequested) return false;
+            foreach (var segment in _sourceSegments.Apply(source, nowSeconds))
+                if (!TryEnqueue(segment)) return false;
             return true;
         }
     }

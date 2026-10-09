@@ -41,7 +41,7 @@ public sealed class GeminiCaptionSession : ICaptionSession
         if (mode == GoogleCaptionMode.TwoStage)
         {
             _translator = new FlashTextTranslator(apiKey);
-            _pipeline = new SourceTranslationPipeline(_translator.TranslateAsync, _lifetime.Token);
+            _pipeline = new SourceTranslationPipeline(_translator.TranslateAsync, _lifetime.Token, coalesceWindow: TimeSpan.Zero);
             _pipeline.Caption += update => { if (!_lifetime.IsCancellationRequested) Caption?.Invoke(update); };
             _pipeline.Failed += Fail;
         }
@@ -228,8 +228,8 @@ public sealed class GeminiCaptionSession : ICaptionSession
                 {
                     foreach (var update in _inputTranscript.Apply(root))
                     {
-                        if (!update.IsFinal || _lifetime.IsCancellationRequested) continue;
-                        if (!_pipeline!.TryEnqueue(update))
+                        if (_lifetime.IsCancellationRequested) continue;
+                        if (!_pipeline!.TryAcceptTranscript(update, Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency))
                             throw new CaptionSessionException("English translation fell behind the audio. Captions paused to avoid a growing delay; restart the session.");
                     }
                 }

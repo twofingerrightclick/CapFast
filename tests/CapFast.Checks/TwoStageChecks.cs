@@ -8,6 +8,17 @@ public static class TwoStageChecks
 {
     public static async Task RunAsync()
     {
+        StreamingSourceChecks.Run();
+        var continuousSpeech = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using (var liveQueue = new SourceTranslationPipeline((source, _) =>
+        { continuousSpeech.TrySetResult(source); return Task.FromResult("We meet today."); }, coalesceWindow: TimeSpan.Zero))
+        {
+            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tuna", false), 0);
+            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tunazungumza", false), 1);
+            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tunazungumza pamoja", false), 3);
+            Check(await Task.WhenAny(continuousSpeech.Task, Task.Delay(100)) == continuousSpeech.Task,
+                "Continuous speech produced no English caption despite a stable complete source sentence before server finalization.");
+        }
         var parser = new GeminiInputTranscript();
         IReadOnlyList<CaptionUpdate> Apply(string json)
         {

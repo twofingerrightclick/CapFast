@@ -5,6 +5,17 @@ public static class CaptionPresentationChecks
 {
     public static void Run()
     {
+        var available = New(1, 4);
+        available.Submit(new("prior", "a b c", true)); Present(available, 0);
+        available.Submit(new("incoming", "d e f", true));
+        Equal("a|b|c|d", Present(available, 0).Lines);
+
+        var rowReading = New(1, 3);
+        rowReading.Submit(new("paragraph", "a b c", true)); Present(rowReading, 0);
+        rowReading.Submit(new("following", "d", true));
+        Blocked(rowReading, .49);
+        Equal("b|c|d", Present(rowReading, .5).Lines);
+
         var full = New(1, 8);
         full.Submit(new("large", "a b c d e f g h", true));
         Equal("a|b|c|d|e|f|g|h", Present(full, 0).Lines);
@@ -13,14 +24,17 @@ public static class CaptionPresentationChecks
         var chunks = New(1, 3);
         chunks.Submit(new("large", "a b c d e f g h", true));
         Equal("a|b|c", Present(chunks, 0).Lines);
-        Blocked(chunks, 1.49);
-        var next = Present(chunks, 1.5);
-        Equal("d|e|f", next.Lines);
-        if (next.ScrollRows != 3) throw new Exception("Oversized phrase did not shift exactly its required rows.");
+        Blocked(chunks, .49);
+        var next = Present(chunks, .5);
+        Equal("b|c|d", next.Lines);
+        if (next.ScrollRows != 1) throw new Exception("Oversized phrase did not advance one readable row.");
+        Equal("c|d|e", Present(chunks, 1).Lines);
+        Equal("d|e|f", Present(chunks, 1.5).Lines);
         Blocked(chunks, 2.99);
         next = Present(chunks, 3);
-        Equal("f|g|h", next.Lines);
-        if (next.ScrollRows != 2) throw new Exception("Final phrase chunk shifted excessive rows.");
+        Equal("e|f|g", next.Lines);
+        Equal("f|g|h", Present(chunks, 4.5).Lines);
+        if (next.ScrollRows != 1) throw new Exception("Final phrase chunk shifted excessive rows.");
 
         var cumulative = New(1, 3);
         foreach (var word in new[] { "a", "b", "c" })
@@ -31,16 +45,22 @@ public static class CaptionPresentationChecks
         var multi = New(1, 4);
         multi.Submit(new("first", "a b", true)); Present(multi, 0);
         multi.Submit(new("second", "c d", true)); Present(multi, 0);
-        multi.Submit(new("third", "e f g h", true)); Blocked(multi, 1.5);
-        if (Present(multi, 3).ScrollRows != 4) throw new Exception("Multi-row eviction ignored outgoing deadlines.");
+        multi.Submit(new("third", "e f g h", true)); Blocked(multi, .74);
+        Equal("b|c|d|e", Present(multi, .75).Lines);
+        Equal("c|d|e|f", Present(multi, 1.5).Lines);
+        Equal("d|e|f|g", Present(multi, 2.25).Lines);
+        Equal("e|f|g|h", Present(multi, 3).Lines);
 
         var resize = New(1, 8);
         resize.Submit(new("resize", "a b c d e f g h", true)); Present(resize, 0);
         resize.Configure(1, 2, text => text.Length, "smaller", .1);
         Equal("a|b", Present(resize, .1).Lines);
-        Equal("c|d", Present(resize, 2).Lines);
-        Equal("e|f", Present(resize, 4).Lines);
-        Equal("g|h", Present(resize, 6).Lines);
+        Equal("b|c", Present(resize, 2).Lines);
+        Equal("c|d", Present(resize, 4).Lines);
+        Equal("d|e", Present(resize, 6).Lines);
+        Equal("e|f", Present(resize, 8).Lines);
+        Equal("f|g", Present(resize, 10).Lines);
+        Equal("g|h", Present(resize, 12).Lines);
 
         var canceled = New(1, 8);
         canceled.Submit(new("resize", "a b c d e f g h", true));
@@ -54,7 +74,8 @@ public static class CaptionPresentationChecks
         var emoji = string.Concat(Enumerable.Repeat("👋🏽", 7));
         unicode.Submit(new("unicode", emoji, true));
         Equal("👋🏽👋🏽|👋🏽👋🏽", Present(unicode, 0).Lines);
-        Equal("👋🏽👋🏽|👋🏽", Present(unicode, 5).Lines);
+        Equal("👋🏽👋🏽|👋🏽👋🏽", Present(unicode, 5).Lines);
+        Equal("👋🏽👋🏽|👋🏽", Present(unicode, 7).Lines);
 
         var partial = New(100, 1);
         partial.Submit(new("p", "one", false)); Present(partial, 0);
@@ -71,6 +92,7 @@ public static class CaptionPresentationChecks
         var revised = New(1, 3);
         revised.Submit(new("p", "a b c", false)); Present(revised, 0);
         revised.Submit(new("p", "a b d e", true));
+        Equal("a|b|d", Present(revised, 1.5).AnimationLines);
         Equal("a|b|d|e", Present(revised, 1.5).AnimationLines);
         var noMatch = New(7, 3);
         noMatch.Submit(new("p", "one two three four", false)); Present(noMatch, 0);
@@ -89,8 +111,8 @@ public static class CaptionPresentationChecks
         var extended = New(1, 3);
         extended.Submit(new("partial", "a b", false)); Present(extended, 0);
         extended.Submit(new("partial", "a b c", true)); Present(extended, 0);
-        extended.Submit(new("next", "d", true)); Blocked(extended, 1.6);
-        Present(extended, 2);
+        extended.Submit(new("next", "d", true)); Blocked(extended, .74);
+        Present(extended, .75);
 
         var shortened = New(1, 4);
         shortened.Submit(new("partial", "a b c d e f", false)); Present(shortened, 0);

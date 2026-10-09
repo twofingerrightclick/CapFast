@@ -21,7 +21,8 @@ public sealed class CaptionPresentation
         public List<Line>? CachedIncoming;
     }
     private sealed record Line(Phrase Phrase, string Text, int Start, int End, string Source, double ReadyAt = 0);
-    private sealed record Pending(Phrase Phrase, int End, List<Line> Previous, List<Line> Incoming, TimeSpan Hold, bool Replay);
+    private sealed record Pending(Phrase Phrase, int End, List<Line> Previous, List<Line> Incoming, TimeSpan Hold, bool Replay,
+        double[] ReadingWeights);
     private readonly LinkedList<Phrase> _queue = new();
     private readonly Dictionary<string, Phrase> _phrases = new();
     private readonly HashSet<string> _finished = new();
@@ -135,29 +136,32 @@ public sealed class CaptionPresentation
         {
             var phrase = node.Value;
             var replay = phrase.Offset < phrase.ReplayEnd;
-            var incoming = phrase.CachedIncoming ??= Wrap(phrase, phrase.Offset,
+            var candidates = phrase.CachedIncoming ??= Wrap(phrase, phrase.Offset,
                 replay ? phrase.ReplayEnd : phrase.Text.Length).Take(_rows).ToList();
-            if (incoming.Count == 0) { FinishChunk(phrase, phrase.Text.Length); continue; }
+            if (candidates.Count == 0) { FinishChunk(phrase, phrase.Text.Length); continue; }
             var before = _visible;
             var kept = phrase.ReviseTail && before.LastOrDefault()?.Phrase == phrase
                 ? before.Take(before.Count - 1).ToList() : before.ToList();
+            // Fill empty rows immediately. Once full, advance one readable row
+            // rather than making a whole paragraph wait for the entire screen.
+            var incoming = candidates.Take(Math.Max(1, _rows - kept.Count)).ToList();
             var scroll = Math.Max(0, kept.Count + incoming.Count - _rows);
             if (scroll > 0 && kept.Take(scroll).Any(line => line.ReadyAt > nowSeconds)) return false;
             var animationLines = kept.Concat(incoming).Select(line => line.Text).ToArray();
             kept = kept.Skip(scroll).ToList(); kept.AddRange(incoming);
-            var exposed = string.Join(" ", incoming.Select(line => line.Text));
+            var exposedLines = incoming.Select(line => line.Text).ToArray();
             if (phrase.ReviseTail && before.LastOrDefault()?.Phrase == phrase)
             {
                 var prior = before[^1].Text;
                 var common = 0;
-                while (common < exposed.Length && common < prior.Length && exposed[common] == prior[common]) common++;
-                exposed = exposed[common..];
+                while (common < exposedLines[0].Length && common < prior.Length && exposedLines[0][common] == prior[common]) common++;
+                exposedLines[0] = exposedLines[0][common..];
             }
-            var words = exposed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
-            var units = Math.Max(words, StringInfo.ParseCombiningCharacters(exposed).Length / 6d);
+            var weights = exposedLines.Select(ReadingUnits).ToArray();
+            var units = weights.Sum();
             var seconds = units * 60d / Math.Clamp(ReadingWordsPerMinute, 80, 300);
             var hold = TimeSpan.FromSeconds(units == 0 ? 0 : phrase.ReviseTail ? seconds : Math.Max(1.5, seconds));
-            _pending = new(phrase, incoming[^1].End, before, incoming, hold, replay);
+            _pending = new(phrase, incoming[^1].End, before, incoming, hold, replay, weights);
             _visible = kept;
             frame = new(CurrentLines, scroll, hold, animationLines);
             return true;
@@ -170,14 +174,24 @@ public sealed class CaptionPresentation
     {
         if (_pending is not { } pending) return;
         _pending = null;
-        var deadline = pending.Replay
-            ? nowSeconds + pending.Hold.TotalSeconds
-            : Math.Max(_readingCursor, nowSeconds) + pending.Hold.TotalSeconds;
+        var start = pending.Replay ? nowSeconds : Math.Max(_readingCursor, nowSeconds);
+        var deadline = start + pending.Hold.TotalSeconds;
         if (!pending.Replay) _readingCursor = deadline;
-        _visible = _visible.Select(line => line.Phrase == pending.Phrase ? line with { ReadyAt = deadline } : line).ToList();
+        var total = pending.ReadingWeights.Sum();
+        var elapsed = 0d;
+        for (var index = 0; index < pending.Incoming.Count; index++)
+        {
+            elapsed += total > 0 ? pending.Hold.TotalSeconds * pending.ReadingWeights[index] / total : 0;
+            var position = _visible.Count - pending.Incoming.Count + index;
+            _visible[position] = _visible[position] with { ReadyAt = start + elapsed };
+        }
         pending.Phrase.ReviseTail = false;
         FinishChunk(pending.Phrase, pending.End);
     }
+
+    private static double ReadingUnits(string text) => Math.Max(
+        text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length,
+        StringInfo.ParseCombiningCharacters(text).Length / 6d);
 
     private void FinishChunk(Phrase phrase, int end)
     {

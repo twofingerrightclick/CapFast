@@ -48,6 +48,7 @@ if (System.Globalization.StringInfo.ParseCombiningCharacters(emojiTail).Length !
     throw new Exception("Long token limit split a text element or failed to bound the tail.");
 GeminiChecks.Run();
 CaptionLayoutChecks.Run();
+CaptionWordRevealChecks.Run();
 await TwoStageChecks.RunAsync();
 await ControllerChecks.RunAsync();
 ConfigurationChecks.Run();
