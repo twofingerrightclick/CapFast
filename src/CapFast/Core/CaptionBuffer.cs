@@ -12,11 +12,16 @@ public sealed class CaptionBuffer
     private string? _partialId;
 
     public string Text { get; private set; } = "";
+    // Text is a bounded history preview. Presentation consumes the accepted
+    // original update so long phrases are not truncated to that preview tail.
+    public CaptionUpdate? LastAcceptedUpdate { get; private set; }
 
     public bool Apply(CaptionUpdate update)
     {
+        LastAcceptedUpdate = null;
         if (_committedIds.Contains(update.UtteranceId)) return false;
         if (!update.IsFinal && string.IsNullOrWhiteSpace(update.Text)) return false;
+        LastAcceptedUpdate = update;
         if (update.IsFinal)
         {
             _committedIds.Add(update.UtteranceId);
@@ -48,6 +53,7 @@ public sealed class CaptionBuffer
         _partial = "";
         _partialId = null;
         Text = "";
+        LastAcceptedUpdate = null;
     }
 
     public static string Tail(string text, int wordLimit)

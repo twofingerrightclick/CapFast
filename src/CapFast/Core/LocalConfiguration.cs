@@ -5,11 +5,13 @@ public sealed class LocalConfiguration
     private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
     public string Path { get; }
     public string? Error { get; private set; }
-    public LocalConfiguration(string? path = null)
+    public LocalConfiguration(string? path = null, bool readValues = true)
     {
-        Path = path ?? FindPath();
+        Path = path ?? FallbackPath;
         try
         {
+            if (path is null) Path = FindPath();
+            if (!readValues) return;
             if (!File.Exists(Path)) return;
             if (new FileInfo(Path).Length > 65536) throw new IOException();
             foreach (var line in File.ReadLines(Path))
@@ -35,14 +37,24 @@ public sealed class LocalConfiguration
         : _values.GetValueOrDefault("GEMINI_API_KEY") is { Length: > 0 } local ? local : _values.GetValueOrDefault("GOOGLE_API_KEY", "");
     private static string FindPath()
     {
+        // A user-owned application file takes precedence. macOS can defer
+        // Documents access after signing a new development build.
+        if (File.Exists(FallbackPath)) return FallbackPath;
         // Packaged development builds find only this project's root, never arbitrary parent .env files.
         var folder = new DirectoryInfo(AppContext.BaseDirectory);
         for (var depth = 0; folder != null && depth < 9; depth++, folder = folder.Parent)
             if (File.Exists(System.IO.Path.Combine(folder.FullName, "src", "CapFast", "CapFast.csproj")))
                 return System.IO.Path.Combine(folder.FullName, ".env");
-        var dataDirectory = OperatingSystem.IsMacOS()
-            ? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Application Support")
-            : Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        return System.IO.Path.Combine(dataDirectory, "CapFast", ".env");
+        return FallbackPath;
+    }
+    public static string FallbackPath
+    {
+        get
+        {
+            var dataDirectory = OperatingSystem.IsMacOS()
+                ? System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Library", "Application Support")
+                : Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            return System.IO.Path.Combine(dataDirectory, "CapFast", ".env");
+        }
     }
 }

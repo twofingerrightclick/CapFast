@@ -60,6 +60,36 @@ internal static class ControllerChecks
         var unsafeFailure = new CaptionController(settings, _ => throw new Exception("secret-value"), a => a());
         await unsafeFailure.ToggleAsync();
         Require(!unsafeFailure.Status.Contains("secret-value") && !unsafeFailure.Errors.Entries.Single().Message.Contains("secret-value"), "Raw exception leaked");
+        var readingSession = new FakeSession();
+        readingSession.Started.SetResult();
+        var reading = new CaptionController(settings, _ => readingSession, a => a());
+        var received = new List<CaptionUpdate>();
+        var cleared = 0;
+        reading.CaptionReceived += received.Add;
+        reading.CaptionsCleared += () => cleared++;
+        await reading.ToggleAsync();
+        var longPhrase = string.Join(" ", Enumerable.Range(1, 100).Select(i => $"word{i:000}"));
+        readingSession.Emit(new CaptionUpdate("long-one", longPhrase, true));
+        Require(received.Count == 1 && received[0].Text == longPhrase, "Display event lost the opening of a long translation");
+        Require(reading.Text != longPhrase, "Long-phrase fixture did not exercise bounded history truncation");
+        readingSession.Emit(new CaptionUpdate("long-two", longPhrase, true));
+        readingSession.Emit(new CaptionUpdate("long-two", longPhrase, true));
+        Require(received.Count == 2 && received[1].UtteranceId == "long-two", "Repeated new phrase lost or duplicate final delivered twice");
+        await reading.PauseForDisplayBacklogAsync();
+        Require(reading.IsPaused && readingSession.Disposed && reading.Errors.Entries.Single().Message.Contains("reading fell behind"),
+            "Display backlog did not pause capture with a visible diagnostic");
+        readingSession.Emit(new CaptionUpdate("late", "Stale after pause", true));
+        Require(received.Count == 2, "Paused session delivered stale raw captions");
+        reading.ClearCaptions();
+        Require(cleared == 1 && reading.Text == "", "Clear did not notify queued presentation");
+        await reading.ShutdownAsync();
+        var gatedStarts = 0;
+        var gated = new CaptionController(settings, _ => { gatedStarts++; throw new Exception("Capture must wait for reading backlog"); }, a => a())
+        { CanAcceptCaptions = () => false };
+        await gated.ToggleAsync();
+        Require(gated.IsPaused && gatedStarts == 0 && gated.Status.Contains("reading fell behind"), "Early resume started capture with a full display backlog");
+        await gated.RunDemoAsync();
+        Require(gated.IsPaused && gated.CaptionUtteranceId is null, "Demo bypassed the reading backlog guard");
         Console.WriteLine("Controller checks passed: paused startup, selected source, pause during connect, rapid resume, stale callbacks, retained captions, shutdown, missing configuration, rolling log.");
     }
     private static void Require(bool valid, string message) { if (!valid) throw new Exception(message); }
@@ -82,5 +112,6 @@ internal static class ControllerChecks
         public Task StartAsync(CancellationToken cancellationToken = default) => Started.Task;
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
         public void Emit(string text) => Caption?.Invoke(new("id", text, false));
+        public void Emit(CaptionUpdate update) => Caption?.Invoke(update);
     }
 }

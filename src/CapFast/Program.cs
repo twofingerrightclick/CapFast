@@ -45,16 +45,52 @@ public sealed class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
-            _controller = new CaptionController(new CaptionSettings(), settings => settings.Provider == SpeechProvider.Google
+            _controller = new CaptionController(new CaptionSettings(loadLocalConfiguration: false) { IsLoadingConfiguration = true }, settings => settings.Provider == SpeechProvider.Google
                 ? new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.GoogleMode)
                 : new AzureCaptionSession(settings.AzureKey, settings.AzureRegion, settings.Locale, settings.Stabilize, settings.AudioDeviceId),
                 action => Dispatcher.UIThread.Post(action));
             _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>
                 { _settings?.Close(); _errors?.Close(); } };
+            _captions.Opened += async (_, _) => await LoadLocalConfigurationAsync();
             desktop.MainWindow = _captions;
             InstallSettingsShortcut(_captions);
         }
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private async Task LoadLocalConfigurationAsync()
+    {
+        if (_controller is not { } controller || _captions is not { } captions) return;
+        var settings = controller.Settings;
+        var originalGoogle = settings.GeminiKey;
+        var originalAzure = settings.AzureKey;
+        var originalRegion = settings.AzureRegion;
+        // Path discovery and file reads can wait for macOS authorization. Keep
+        // both off the UI thread so the caption window is already usable.
+        try
+        {
+            var read = Task.Run(() => new LocalConfiguration());
+            if (await Task.WhenAny(read, Task.Delay(TimeSpan.FromSeconds(5))) != read && captions.IsVisible)
+            {
+                settings.IsLoadingConfiguration = false;
+                settings.ConfigurationError = "Reading the local API file is taking longer than expected. Enter a key in Settings or check macOS file access.";
+                controller.Errors.Add(settings.ConfigurationError);
+                controller.NotifyLocalConfigurationLoaded();
+            }
+            var local = await read;
+            if (!captions.IsVisible) return;
+            settings.ApplyLocalConfiguration(local, originalGoogle, originalAzure, originalRegion);
+            if (local.Error is { } error) controller.Errors.Add(error);
+            controller.NotifyLocalConfigurationLoaded();
+        }
+        catch
+        {
+            if (!captions.IsVisible) return;
+            settings.IsLoadingConfiguration = false;
+            settings.ConfigurationError = "Could not load the local API configuration. Open Settings to enter a key or reload the file.";
+            controller.Errors.Add(settings.ConfigurationError);
+            controller.NotifyLocalConfigurationLoaded();
+        }
     }
 
     private void InstallSettingsShortcut(Window window) => window.AddHandler(InputElement.KeyDownEvent, (_, e) =>

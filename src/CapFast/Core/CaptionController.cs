@@ -6,6 +6,7 @@ namespace CapFast.Core;
 // Serializing transitions prevents an old start/stop from owning a newer session.
 public sealed class CaptionController
 {
+    private const string DisplayBacklogMessage = "Caption reading fell behind the speaker. Transcription paused to preserve queued text; let the captions finish, then press Space to restart.";
     private readonly Func<CaptionSettings, ICaptionSession> _factory;
     private readonly Action<Action> _dispatch;
     private readonly CaptionBuffer _buffer = new();
@@ -26,12 +27,38 @@ public sealed class CaptionController
     public string? CaptionUtteranceId { get; private set; }
     public string Status { get; private set; } = "Paused — press Space to start";
     public ErrorLog Errors { get; } = new();
-    public string? MissingConfiguration => Settings.Provider == SpeechProvider.Google
+    public string? MissingConfiguration => Settings.IsLoadingConfiguration
+        ? "Loading your local API configuration… You can open Settings while it loads."
+        : Settings.Provider == SpeechProvider.Google
         ? string.IsNullOrWhiteSpace(Settings.GeminiKey) ? "Add your Google API key in Settings to start captions." : null
         : string.IsNullOrWhiteSpace(Settings.AzureKey) || string.IsNullOrWhiteSpace(Settings.AzureRegion) ? "Add your Azure key and region in Settings to start captions." : null;
     public event Action? Changed;
+    public event Action<CaptionUpdate>? CaptionReceived;
+    public event Action? CaptionsCleared;
+    public event Action? LocalConfigurationLoaded;
+    public Func<bool>? CanAcceptCaptions { get; set; }
     public void SettingsChanged() => Changed?.Invoke();
-    public void ClearCaptions() { _buffer.Clear(); CaptionUtteranceId = null; Changed?.Invoke(); }
+    public void NotifyLocalConfigurationLoaded() { LocalConfigurationLoaded?.Invoke(); Changed?.Invoke(); }
+    public void ClearCaptions()
+    { _buffer.Clear(); CaptionUtteranceId = null; CaptionsCleared?.Invoke(); Changed?.Invoke(); }
+    public Task PauseForDisplayBacklogAsync() => _shutdown ? Task.CompletedTask : PauseWithErrorAsync(DisplayBacklogMessage);
+
+    private bool DisplayReady()
+    {
+        if (CanAcceptCaptions?.Invoke() != false) return true;
+        _wantLive = false; State = CaptionState.Paused; Status = DisplayBacklogMessage;
+        Errors.Add(DisplayBacklogMessage); Changed?.Invoke();
+        return false;
+    }
+
+    private void ApplyCaption(CaptionUpdate update)
+    {
+        _buffer.Apply(update);
+        if (_buffer.LastAcceptedUpdate is not { } accepted) return;
+        CaptionUtteranceId = accepted.UtteranceId;
+        CaptionReceived?.Invoke(accepted);
+        Changed?.Invoke();
+    }
     public Task ToggleAsync()
     {
         if (_shutdown) return Task.CompletedTask;
@@ -54,6 +81,7 @@ public sealed class CaptionController
             if (!_wantLive) { await StopAsync(); return; }
             if ((_session != null || _demo != null) && State == CaptionState.Live) return;
             if (_session != null || _demo != null) await StopAsync();
+            if (!DisplayReady()) return;
             if (MissingConfiguration is { } missing)
             { _wantLive = false; State = CaptionState.Paused; Status = missing; Changed?.Invoke(); return; }
             State = CaptionState.Starting; Status = "Connecting…"; Changed?.Invoke();
@@ -66,8 +94,7 @@ public sealed class CaptionController
                 _session = session;
                 session.Caption += update => _dispatch(() =>
                 {
-                    if (generation == _generation && _wantLive && _buffer.Apply(update))
-                    { CaptionUtteranceId = update.UtteranceId; Changed?.Invoke(); }
+                    if (generation == _generation && _wantLive) ApplyCaption(update);
                 });
                 session.Status += message => _dispatch(() =>
                 { if (generation == _generation && _wantLive) { Status = message; Changed?.Invoke(); } });
@@ -123,6 +150,7 @@ public sealed class CaptionController
         try
         {
             if (_shutdown || !IsPaused || _session != null || _demo != null) return;
+            if (!DisplayReady()) return;
             _demo = new CancellationTokenSource(); token = _demo.Token;
             generation = ++_generation;
             _wantLive = true; State = CaptionState.Live; Status = "Caption demo — press Space to pause"; Changed?.Invoke();
@@ -130,14 +158,25 @@ public sealed class CaptionController
         finally { _transition.Release(); }
         try
         {
-            var frames = new[] { "Welcome", "Welcome to today's", "Welcome to today's seminar.", "We are sharing ideas", "We are sharing ideas together." };
+            var frames = new (string Text, int Phrase, bool Final)[]
+            {
+                ("Welcome", 0, false),
+                ("Welcome to today's", 0, false),
+                ("Welcome to today's seminar.", 0, true),
+                ("We are sharing ideas", 1, false),
+                ("We are sharing ideas together.", 1, true),
+                ("Our community brings together people with different experiences, and everyone has something valuable to contribute.", 2, true),
+                ("Today we will listen carefully, ask questions, and consider how these ideas can help our families.", 3, true),
+                ("A small act of kindness can make a lasting difference to someone who is facing a difficult day.", 4, true),
+                ("When we work together with patience and understanding, we discover possibilities that we could not see alone.", 5, true),
+                ("Thank you for joining us and for taking the time to learn from one another.", 6, true)
+            };
             for (var i = 0; i < frames.Length; i++)
             {
                 await Task.Delay(900, token);
                 if (generation != _generation) return;
-                var update = new CaptionUpdate($"demo-{generation}-{(i < 3 ? 0 : 1)}", frames[i], i == 2 || i == 4);
-                if (_buffer.Apply(update))
-                { CaptionUtteranceId = update.UtteranceId; Changed?.Invoke(); }
+                var update = new CaptionUpdate($"demo-{generation}-{frames[i].Phrase}", frames[i].Text, frames[i].Final);
+                ApplyCaption(update);
             }
         }
         catch (OperationCanceledException) { }

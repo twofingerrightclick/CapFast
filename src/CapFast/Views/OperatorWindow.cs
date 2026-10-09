@@ -22,6 +22,9 @@ public sealed class SettingsWindow : Window
     private readonly ComboBox _locale = new() { ItemsSource = new[] { "sw-KE", "sw-TZ" } };
     private readonly CheckBox _stabilize = new() { Content = "Stabilize provisional translations" };
     private readonly Slider _size = new() { Minimum = 28, Maximum = 72 };
+    private readonly Slider _readingSpeed = new() { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true };
+    private readonly TextBlock _readingLabel = new() { FontWeight = FontWeight.Medium };
+    private readonly SelectableTextBlock _configurationPath = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .75 };
     private readonly TextBlock _notice = new() { TextWrapping = TextWrapping.Wrap, Opacity = .75 };
     private readonly StackPanel _googlePanel;
     private readonly StackPanel _azurePanel;
@@ -35,6 +38,12 @@ public sealed class SettingsWindow : Window
     private bool _checkingMicrophone;
     private bool _loading;
     private bool _closed;
+    private bool _reloadingFile;
+    private Task<LocalConfiguration>? _reloadRead;
+    private string? _reloadPath;
+    private bool _openingFile;
+    private Task? _prepareFile;
+    private string? _preparePath;
     private CancellationTokenSource? _microphoneCheck;
 
     public SettingsWindow(CaptionController controller)
@@ -50,6 +59,9 @@ public sealed class SettingsWindow : Window
         _locale.SelectedItem = controller.Settings.Locale;
         _stabilize.IsChecked = controller.Settings.Stabilize;
         _size.Value = controller.Settings.FontSize;
+        _configurationPath.Text = controller.Settings.ConfigurationPath;
+        _readingSpeed.Value = controller.Settings.ReadingWordsPerMinute;
+        _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
         _googlePanel = new StackPanel { Spacing = 8, Children = { Label("Google caption mode"), _googleMode,
             new TextBlock { Text = "Two-stage mode translates completed speech segments. Live transcription sessions last up to 10 minutes; restart when the session ends.",
                 TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 }, Label("Gemini API key"), _gemini } };
@@ -63,19 +75,21 @@ public sealed class SettingsWindow : Window
         clear.Click += (_, _) => controller.ClearCaptions();
         _demo.Click += async (_, _) => { await controller.RunDemoAsync(); };
         _pause.Click += async (_, _) => await controller.PauseAsync();
-        _openFile.Click += (_, _) => OpenConfigurationFile();
-        _reloadFile.Click += (_, _) => ReloadConfiguration();
+        _openFile.Click += async (_, _) => await OpenConfigurationFileAsync();
+        _reloadFile.Click += async (_, _) => await ReloadConfigurationAsync();
         _microphone.Click += async (_, _) => await CheckMicrophoneAsync();
         Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(28), Spacing = 18,
             Children = { new TextBlock { Text = "Settings", FontSize = 28, FontWeight = FontWeight.SemiBold },
                 _notice, _pause, _configuration,
                 new TextBlock { Text = "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
-                new SelectableTextBlock { Text = controller.Settings.ConfigurationPath, TextWrapping = TextWrapping.Wrap,
-                    FontSize = 12, Opacity = .75 },
+                _configurationPath,
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } },
                 _microphone, _diagnostic,
                 new Separator(), Label("Caption size"), _size,
+                _readingLabel, _readingSpeed,
+                new TextBlock { Text = "Text fills the window. This pace controls how soon older text can leave; a slower pace may delay captions behind the speaker.",
+                    TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _demo, clear } },
                 new TextBlock { Text = "Press Space in the caption window to start or pause. F11 toggles fullscreen; Esc exits fullscreen.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 }, close } } };
@@ -92,65 +106,119 @@ public sealed class SettingsWindow : Window
             controller.Settings.FontSize = _size.Value;
             controller.SettingsChanged();
         };
+        _readingSpeed.PropertyChanged += (_, e) =>
+        {
+            if (e.Property != Slider.ValueProperty) return;
+            controller.Settings.ReadingWordsPerMinute = (int)Math.Round(_readingSpeed.Value);
+            _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
+            controller.SettingsChanged();
+        };
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
         controller.Changed += Refresh;
+        controller.LocalConfigurationLoaded += RefreshLocalConfiguration;
         Closed += (_, _) =>
         {
             _closed = true;
             controller.Changed -= Refresh;
+            controller.LocalConfigurationLoaded -= RefreshLocalConfiguration;
             _microphoneCheck?.Cancel();
         };
         _diagnostic.Text = controller.Settings.ConfigurationError ?? "";
         Refresh();
     }
 
-    private void OpenConfigurationFile()
+    private void RefreshLocalConfiguration()
     {
+        if (_closed) return;
+        _loading = true;
+        _gemini.Text = _controller.Settings.GeminiKey;
+        _azure.Text = _controller.Settings.AzureKey;
+        _region.Text = _controller.Settings.AzureRegion;
+        _configurationPath.Text = _controller.Settings.ConfigurationPath;
+        _diagnostic.Text = _controller.Settings.ConfigurationError ?? "";
+        _loading = false;
+    }
+
+    private async Task OpenConfigurationFileAsync()
+    {
+        if (_openingFile) return;
+        _openingFile = true;
+        Refresh();
         try
         {
             var path = _controller.Settings.ConfigurationPath;
-            if (!File.Exists(path))
+            if (_prepareFile is null || _prepareFile.IsCompleted || _preparePath != path)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
-                if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-                using var file = new FileStream(path, options);
-                using var writer = new StreamWriter(file);
-                writer.WriteLine("# Add your Google API key, save, then click Reload file in CapFast.");
-                writer.WriteLine("GEMINI_API_KEY=");
+                _preparePath = path;
+                _prepareFile = Task.Run(() =>
+                {
+                    if (File.Exists(path)) return;
+                    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                    var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+                    if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                    using var file = new FileStream(path, options);
+                    using var writer = new StreamWriter(file);
+                    writer.WriteLine("# Add your Google API key, save, then click Reload file in CapFast.");
+                    writer.WriteLine("GEMINI_API_KEY=");
+                });
             }
+            await _prepareFile.WaitAsync(TimeSpan.FromSeconds(5));
+            if (_closed) return;
             var info = new ProcessStartInfo { UseShellExecute = true };
             if (OperatingSystem.IsMacOS())
             {
                 info.FileName = "/usr/bin/open";
                 info.ArgumentList.Add("-t");
-                info.ArgumentList.Add(_controller.Settings.ConfigurationPath);
+                info.ArgumentList.Add(path);
             }
-            else info.FileName = _controller.Settings.ConfigurationPath;
+            else info.FileName = path;
             using var process = Process.Start(info);
             _diagnostic.Text = "Save the API key file, then click Reload file.";
         }
         catch
         {
+            if (_closed) return;
             const string message = "Could not open the API key file. Open the displayed path in your text editor.";
             _diagnostic.Text = message;
             _controller.Errors.Add(message);
         }
+        finally { _openingFile = false; if (!_closed) Refresh(); }
     }
 
-    private void ReloadConfiguration()
+    private async Task ReloadConfigurationAsync()
     {
-        if (!_controller.IsPaused) return;
-        var local = new LocalConfiguration(_controller.Settings.ConfigurationPath);
-        if (local.Error is { } error)
-        { _diagnostic.Text = error; _controller.Errors.Add(error); return; }
-        _loading = true;
-        _gemini.Text = local.GoogleKey;
-        _azure.Text = local.Get("AZURE_SPEECH_KEY");
-        _region.Text = local.Get("AZURE_SPEECH_REGION");
-        _loading = false;
-        Save();
-        _diagnostic.Text = "Local API configuration reloaded.";
+        if (!_controller.IsPaused || _reloadingFile) return;
+        _reloadingFile = true;
+        var settings = _controller.Settings;
+        var originalGoogle = settings.GeminiKey;
+        var originalAzure = settings.AzureKey;
+        var originalRegion = settings.AzureRegion;
+        var path = settings.ConfigurationPath;
+        Refresh();
+        _diagnostic.Text = "Reading local API configuration…";
+        try
+        {
+            // Reuse a blocked read rather than starting another on each click.
+            if (_reloadRead is null || _reloadRead.IsCompleted || _reloadPath != path)
+            { _reloadPath = path; _reloadRead = Task.Run(() => new LocalConfiguration(path)); }
+            var local = await _reloadRead.WaitAsync(TimeSpan.FromSeconds(5));
+            if (_closed) return;
+            if (local.Error is { } error)
+            { _diagnostic.Text = error; _controller.Errors.Add(error); return; }
+            settings.ApplyLocalConfiguration(local, originalGoogle, originalAzure, originalRegion);
+            _controller.NotifyLocalConfigurationLoaded();
+            _diagnostic.Text = "Local API configuration reloaded.";
+        }
+        catch (TimeoutException)
+        {
+            if (!_closed) _diagnostic.Text = "The API file is still waiting for access. Check macOS file permissions or enter a key above, then try Reload again.";
+        }
+        catch
+        {
+            if (!_closed)
+            { const string message = "Could not reload the local API configuration."; _diagnostic.Text = message; _controller.Errors.Add(message); }
+        }
+        finally { _reloadingFile = false; if (!_closed) Refresh(); }
     }
 
     private async Task CheckMicrophoneAsync()
@@ -203,7 +271,7 @@ public sealed class SettingsWindow : Window
         _configuration.IsEnabled = _controller.IsPaused;
         _pause.IsVisible = !_controller.IsPaused;
         _demo.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
-        _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
+        _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile;
         _microphone.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _microphone.IsVisible = OperatingSystem.IsMacOS();
         _googlePanel.IsVisible = _provider.SelectedIndex == 0;

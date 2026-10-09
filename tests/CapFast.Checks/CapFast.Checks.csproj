@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="../../src/CapFast/Core/CaptionBuffer.cs" Link="CaptionBuffer.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionLineLayout.cs" Link="CaptionLineLayout.cs" />
+    <Compile Include="../../src/CapFast/Core/CaptionPresentation.cs" Link="CaptionPresentation.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionSequence.cs" Link="CaptionSequence.cs" />
     <Compile Include="../../src/CapFast/Core/GeminiTranscript.cs" Link="GeminiTranscript.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionSettings.cs" Link="CaptionSettings.cs" />

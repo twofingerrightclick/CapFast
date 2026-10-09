@@ -5,6 +5,7 @@ public static class CaptionLayoutChecks
 {
     public static void Run()
     {
+        CaptionPresentationChecks.Run();
         var layout = new CaptionLineLayout();
         IReadOnlyList<string> Update(string text) => layout.Update(text, 7, value => value.Length);
         Equal("one", Update("one"));

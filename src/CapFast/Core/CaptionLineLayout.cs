@@ -20,7 +20,7 @@ public sealed class CaptionLineLayout
     public IReadOnlyList<string> Update(string text, double width, Func<string, double> measure,
         int rows = 3, string layoutKey = "", string? utteranceId = null)
     {
-        rows = Math.Clamp(rows, 1, 3);
+        rows = Math.Max(1, rows);
         width = Math.Max(1, width);
         _scrollFrames.Clear();
         var words = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
