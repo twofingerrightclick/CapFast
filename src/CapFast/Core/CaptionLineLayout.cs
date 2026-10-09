@@ -2,28 +2,31 @@ using System.Globalization;
 
 namespace CapFast.Core;
 
-// A caption page fills fixed rows from the top. Only a full page is replaced;
-// adding another row never moves earlier rows upward.
+// Completed rows are sealed. Only the active tail is revised; new rows scroll
+// one row at a time through a fixed-height caption band.
 public sealed class CaptionLineLayout
 {
     private sealed record Part(long Word, string Text, bool Space);
     private readonly List<List<Part>> _lines = new();
     private string[] _previous = Array.Empty<string>();
     private long _previousStart;
+    private string? _previousUtteranceId;
     private double _width;
     private int _rows;
     private string _layoutKey = "";
-    private long _pageGeneration;
+    private readonly List<IReadOnlyList<string>> _scrollFrames = new();
+    public IReadOnlyList<IReadOnlyList<string>> ScrollFrames => _scrollFrames;
 
     public IReadOnlyList<string> Update(string text, double width, Func<string, double> measure,
-        int rows = 3, string layoutKey = "")
+        int rows = 3, string layoutKey = "", string? utteranceId = null)
     {
         rows = Math.Clamp(rows, 1, 3);
         width = Math.Max(1, width);
+        _scrollFrames.Clear();
         var words = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (words.Length == 0)
         {
-            _lines.Clear(); _previous = words; _previousStart = 0;
+            _lines.Clear(); _previous = words; _previousStart = 0; _previousUtteranceId = null;
             _width = width; _rows = rows; _layoutKey = layoutKey;
             return Array.Empty<string>();
         }
@@ -50,34 +53,22 @@ public sealed class CaptionLineLayout
         var start = _previousStart + bestOffset;
         if (common == 0)
         {
-            _lines.Clear();
-            start = _previousStart + _previous.Length;
+            // Source identity distinguishes an entirely revised partial from a
+            // new final segment which displaced the entire bounded text tail.
+            start = utteranceId is not null && utteranceId != _previousUtteranceId
+                ? _previousStart + _previous.Length : _previousStart;
         }
         var changedAt = start + common;
-        foreach (var line in _lines) line.RemoveAll(part => part.Word >= changedAt);
-        while (_lines.Count > 0 && _lines[^1].Count == 0) _lines.RemoveAt(_lines.Count - 1);
-        // A shorter correction can retract the only words on the new page.
-        // Restore the corrected preceding page instead of leaving a blank caption.
-        if (_lines.Count == 0 && common == words.Length && common > 0) common = 0;
-        var generation = _pageGeneration;
-        for (var index = common; index < words.Length; index++) Append(start + index, words[index], measure);
-        if (_pageGeneration != generation && common < words.Length)
+        if (_lines.Count > 0 && _lines[^1].Count > 0)
         {
-            // A service result arrives as one batch. Do not consume its opening
-            // words into a completed page that never reaches the screen.
-            var overflowPage = _lines.Select(line => line.ToList()).ToArray();
-            _lines.Clear();
-            generation = _pageGeneration;
-            for (var index = common; index < words.Length; index++) Append(start + index, words[index], measure);
-            if (_pageGeneration != generation)
-            {
-                // A batch larger than a whole page still uses the bounded tail.
-                _lines.Clear();
-                _lines.AddRange(overflowPage);
-            }
+            var activeStart = _lines[^1][0].Word;
+            common = Math.Max(common, (int)Math.Clamp(activeStart - start, 0, words.Length));
+            _lines[^1].RemoveAll(part => part.Word >= Math.Max(changedAt, activeStart));
         }
+        for (var index = common; index < words.Length; index++) Append(start + index, words[index], measure);
         _previous = words;
         _previousStart = start;
+        _previousUtteranceId = utteranceId;
         return Render();
     }
 
@@ -89,10 +80,11 @@ public sealed class CaptionLineLayout
         if (measure(prefix + (prefix.Length > 0 ? " " : "") + word) <= _width)
         {
             line.Add(new(index, word, line.Count > 0));
+            CaptureActiveFrame();
             return;
         }
         if (line.Count > 0) { NewLine(); line = _lines[^1]; }
-        if (measure(word) <= _width) { line.Add(new(index, word, false)); return; }
+        if (measure(word) <= _width) { line.Add(new(index, word, false)); CaptureActiveFrame(); return; }
 
         // Long unbroken tokens split only between Unicode text elements.
         var elements = StringInfo.GetTextElementEnumerator(word);
@@ -103,17 +95,29 @@ public sealed class CaptionLineLayout
             if (fragment.Length > 0 && measure(fragment + element) > _width)
             {
                 line.Add(new(index, fragment, false));
+                CaptureActiveFrame();
                 NewLine(); line = _lines[^1]; fragment = "";
             }
             fragment += element;
         }
         if (fragment.Length > 0) line.Add(new(index, fragment, false));
+        CaptureActiveFrame();
     }
 
     private void NewLine()
     {
-        if (_lines.Count >= _rows) { _lines.Clear(); _pageGeneration++; }
+        var scrolling = _lines.Count >= _rows;
+        if (scrolling)
+        {
+            if (_scrollFrames.Count == 0) _scrollFrames.Add(Render());
+            _lines.RemoveAt(0);
+        }
         _lines.Add(new());
+        if (scrolling) _scrollFrames.Add(Render());
+    }
+    private void CaptureActiveFrame()
+    {
+        if (_scrollFrames.Count > 0) _scrollFrames[^1] = Render();
     }
     private IReadOnlyList<string> Render() => _lines.Select(RenderLine).ToArray();
     private static string RenderLine(List<Part> line) => string.Concat(line.Select(part => (part.Space ? " " : "") + part.Text));

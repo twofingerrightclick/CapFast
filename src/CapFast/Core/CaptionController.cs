@@ -23,6 +23,7 @@ public sealed class CaptionController
     public CaptionState State { get; private set; } = CaptionState.Paused;
     public bool IsPaused => State == CaptionState.Paused;
     public string Text => _buffer.Text;
+    public string? CaptionUtteranceId { get; private set; }
     public string Status { get; private set; } = "Paused — press Space to start";
     public ErrorLog Errors { get; } = new();
     public string? MissingConfiguration => Settings.Provider == SpeechProvider.Google
@@ -30,7 +31,7 @@ public sealed class CaptionController
         : string.IsNullOrWhiteSpace(Settings.AzureKey) || string.IsNullOrWhiteSpace(Settings.AzureRegion) ? "Add your Azure key and region in Settings to start captions." : null;
     public event Action? Changed;
     public void SettingsChanged() => Changed?.Invoke();
-    public void ClearCaptions() { _buffer.Clear(); Changed?.Invoke(); }
+    public void ClearCaptions() { _buffer.Clear(); CaptionUtteranceId = null; Changed?.Invoke(); }
     public Task ToggleAsync()
     {
         if (_shutdown) return Task.CompletedTask;
@@ -65,7 +66,8 @@ public sealed class CaptionController
                 _session = session;
                 session.Caption += update => _dispatch(() =>
                 {
-                    if (generation == _generation && _wantLive && _buffer.Apply(update)) Changed?.Invoke();
+                    if (generation == _generation && _wantLive && _buffer.Apply(update))
+                    { CaptionUtteranceId = update.UtteranceId; Changed?.Invoke(); }
                 });
                 session.Status += message => _dispatch(() =>
                 { if (generation == _generation && _wantLive) { Status = message; Changed?.Invoke(); } });
@@ -133,7 +135,9 @@ public sealed class CaptionController
             {
                 await Task.Delay(900, token);
                 if (generation != _generation) return;
-                _buffer.Apply(new($"demo-{generation}-{(i < 3 ? 0 : 1)}", frames[i], i == 2 || i == 4)); Changed?.Invoke();
+                var update = new CaptionUpdate($"demo-{generation}-{(i < 3 ? 0 : 1)}", frames[i], i == 2 || i == 4);
+                if (_buffer.Apply(update))
+                { CaptionUtteranceId = update.UtteranceId; Changed?.Invoke(); }
             }
         }
         catch (OperationCanceledException) { }

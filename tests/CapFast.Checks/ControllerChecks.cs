@@ -23,11 +23,16 @@ internal static class ControllerChecks
         sessions[0].Started.SetResult();
         await Task.WhenAll(start, pause);
         Require(controller.IsPaused && sessions[0].Disposed && controller.Text == "", "Pause during start failed");
+        Require(controller.CaptionUtteranceId is null, "Stale caption changed display identity");
         start = controller.ToggleAsync(); sessions[1].Started.SetResult(); await start;
         sessions[1].Emit("Keep these captions");
         await controller.PauseAsync();
         sessions[1].Emit("stale");
         Require(controller.IsPaused && controller.Text == "Keep these captions", "Pause changed captions or accepted stale callback");
+        controller.SettingsChanged();
+        Require(controller.CaptionUtteranceId == "id", "Pause or settings lost the retained caption identity");
+        controller.ClearCaptions();
+        Require(controller.Text == "" && controller.CaptionUtteranceId is null, "Clear retained stale caption identity");
         start = controller.ToggleAsync();
         pause = controller.ToggleAsync();
         var resume = controller.ToggleAsync();
