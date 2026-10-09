@@ -53,6 +53,7 @@ var emojiTail = CaptionBuffer.Tail(string.Concat(Enumerable.Repeat("👋🏽", 1
 if (System.Globalization.StringInfo.ParseCombiningCharacters(emojiTail).Length != 512)
     throw new Exception("Long token limit split a text element or failed to bound the tail.");
 GeminiChecks.Run();
+CaptionFilterChecks.Run();
 CaptionLayoutChecks.Run();
 CaptionWordRevealChecks.Run();
 SpeechAudioGateChecks.Run();

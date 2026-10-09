@@ -50,12 +50,15 @@ public sealed class CaptionPresentation
         if (_finished.Contains(update.UtteranceId)) return true;
         if (string.IsNullOrWhiteSpace(update.Text))
         {
-            if (update.IsFinal && _phrases.TryGetValue(update.UtteranceId, out var withdrawn))
+            if (_phrases.TryGetValue(update.UtteranceId, out var withdrawn))
             {
                 CancelPending(); _queue.Remove(withdrawn); _phrases.Remove(withdrawn.Id);
                 if (_visible.LastOrDefault()?.Phrase == withdrawn) _visible.RemoveAt(_visible.Count - 1);
-                _finished.Add(withdrawn.Id); _finishedOrder.Enqueue(withdrawn.Id);
-                while (_finishedOrder.Count > 256) _finished.Remove(_finishedOrder.Dequeue());
+                if (update.IsFinal)
+                {
+                    _finished.Add(withdrawn.Id); _finishedOrder.Enqueue(withdrawn.Id);
+                    while (_finishedOrder.Count > 256) _finished.Remove(_finishedOrder.Dequeue());
+                }
                 Generation++;
             }
             return CanAcceptCaptions;

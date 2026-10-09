@@ -87,6 +87,9 @@ public sealed class CaptionController
         // Late results from already accepted speech must not refill the screen
         // after the music timeout. New non-music activity restores delivery.
         if (_musicExpired && AudioActivity == AudioActivity.Music) return;
+        // Filter every provider and every interim revision before either the
+        // history preview or animated presentation can receive caption text.
+        update = update with { Text = EnglishCaptionFilter.Default.Filter(update.Text) };
         _buffer.Apply(update);
         if (_buffer.LastAcceptedUpdate is not { } accepted) return;
         CaptionUtteranceId = accepted.UtteranceId;

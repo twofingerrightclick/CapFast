@@ -138,6 +138,38 @@ internal static class ControllerChecks
         Require(race.Errors.Entries.Count == 1, "Stale recovery diagnostics survived pause");
         Require(raceClears == 0 && race.Text.Length > 0, "Queued music timeout cleared captions after pause");
         await race.ShutdownAsync();
+        var filteredSession = new FakeSession(); filteredSession.Started.SetResult();
+        var filtered = new CaptionController(settings, _ => filteredSession, a => a());
+        var filteredUpdates = new List<CaptionUpdate>();
+        var filteredPresentation = new CaptionPresentation();
+        filteredPresentation.Configure(100, 3, text => text.Length, "filter-test");
+        filtered.CaptionReceived += update => { filteredUpdates.Add(update); filteredPresentation.Submit(update); };
+        await filtered.ToggleAsync();
+        filteredSession.Emit(new CaptionUpdate("filtered-final", "Welcome sex today FUCK everyone.", true));
+        Require(filtered.Text == "Welcome today everyone." && filteredUpdates.Single().Text == filtered.Text,
+            "Unfiltered text reached caption history or presentation");
+        Require(filteredUpdates[0].UtteranceId == "filtered-final" && filteredUpdates[0].IsFinal,
+            "Filtering changed source identity or finality");
+        Require(filteredPresentation.TryPresent(0, out var filterFrame) && filterFrame!.Lines.Single() == filtered.Text,
+            "Displayed frame contained unfiltered text");
+        filteredPresentation.Presented(0);
+        filteredSession.Emit(new CaptionUpdate("filtered-partial", "se", false));
+        Require(filteredPresentation.TryPresent(0, out _), "Provisional caption missing");
+        filteredPresentation.Presented(0);
+        filteredSession.Emit(new CaptionUpdate("filtered-partial", "sex", false));
+        Require(filteredUpdates.Last().Text == "" && filtered.Text == "Welcome today everyone." &&
+            filteredPresentation.CurrentLines.SequenceEqual(new[] { "Welcome today everyone." }),
+            "Fully removed interim caption did not withdraw its previous tail");
+        filteredSession.Emit(new CaptionUpdate("filtered-partial", "Welcome again.", true));
+        Require(filteredPresentation.TryPresent(0, out filterFrame) && filterFrame!.Lines.Last() == "Welcome again.",
+            "Empty filtered interim update prematurely finalized its source");
+        filteredPresentation.Presented(0);
+        filteredSession.Emit(new CaptionUpdate("only-blocked", "sex fuck", true));
+        Require(filteredUpdates.Last().Text == "" && filteredPresentation.PendingPhrases == 0,
+            "Fully blocked final occupied caption space");
+        filteredSession.Emit(new CaptionUpdate("only-blocked", "Late safe duplicate", true));
+        Require(filteredUpdates.Last().Text == "", "Filtered final lost duplicate suppression");
+        await filtered.ShutdownAsync();
         Console.WriteLine("Controller checks passed: paused startup, selected source, pause during connect, rapid resume, stale callbacks, retained captions, shutdown, missing configuration, rolling log.");
     }
     private static void Require(bool valid, string message) { if (!valid) throw new Exception(message); }

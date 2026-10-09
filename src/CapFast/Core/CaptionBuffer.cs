@@ -20,7 +20,6 @@ public sealed class CaptionBuffer
     {
         LastAcceptedUpdate = null;
         if (_committedIds.Contains(update.UtteranceId)) return false;
-        if (!update.IsFinal && string.IsNullOrWhiteSpace(update.Text)) return false;
         LastAcceptedUpdate = update;
         if (update.IsFinal)
         {
