@@ -10,11 +10,11 @@ public sealed class FlashTextTranslator : IDisposable
     private readonly string _key;
     private string _previousSource = "";
 
-    public FlashTextTranslator(string key)
+    public FlashTextTranslator(string key, HttpMessageHandler? handler = null)
     {
         if (string.IsNullOrWhiteSpace(key)) throw new CaptionSessionException("A Google API key is required for text translation.");
         _key = key.Trim();
-        _http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
+        _http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
         _http.DefaultRequestHeaders.Add("x-goog-api-key", _key);
     }
 
@@ -37,40 +37,63 @@ public sealed class FlashTextTranslator : IDisposable
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post,
-                $"https://generativelanguage.googleapis.com/v1beta/models/{Model}:generateContent")
-            { Content = JsonContent.Create(CreateRequest(source, _previousSource)) };
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-            if (!response.IsSuccessStatusCode)
+            string translation;
+            for (var attempt = 0; ; attempt++)
             {
-                var code = (int)response.StatusCode;
-                throw new CaptionSessionException(code switch
+                try { translation = await TranslateOnceAsync(source, timeout.Token); break; }
+                catch (Exception error) when (attempt < 2 && !timeout.IsCancellationRequested &&
+                    error is HttpRequestException or IOException or TransientServiceException)
                 {
-                    401 or 403 => $"Google text translation denied access (HTTP {code}). Check API key restrictions, billing, and Flash model access.",
-                    429 => "Google text translation quota was exceeded (HTTP 429). Check quota and billing before restarting.",
-                    400 or 404 => $"Google rejected the Flash translation model or configuration (HTTP {code}).",
-                    _ => $"Google text translation failed (HTTP {code}). Restart when the connection or service recovers."
-                });
+                    // Retry the same fragment, without advancing translation context.
+                    // All attempts share the original twenty-second deadline.
+                    await Task.Delay(TimeSpan.FromMilliseconds(500 * (attempt + 1)), timeout.Token);
+                }
             }
-            using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
-            using var memory = new MemoryStream();
-            var buffer = new byte[8192];
-            int length;
-            while ((length = await stream.ReadAsync(buffer, timeout.Token)) != 0)
-            {
-                if (memory.Length + length > 1024 * 1024) throw new CaptionSessionException("Google text translation response exceeded the size limit.");
-                memory.Write(buffer, 0, length);
-            }
-            using var json = JsonDocument.Parse(memory.GetBuffer().AsMemory(0, (int)memory.Length));
-            var translation = ParseResponse(json.RootElement).Replace(_key, "[REDACTED]", StringComparison.Ordinal);
             _previousSource = string.Join(" ", source.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).TakeLast(48));
             return translation;
         }
         catch (CaptionSessionException) { throw; }
+        catch (TransientServiceException error) { throw new CaptionSessionException($"Google text translation failed after bounded retries (HTTP {error.Status}). Restart when the service recovers."); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException) { throw new CaptionSessionException("Google text translation timed out. Restart when the connection recovers."); }
         catch (HttpRequestException error) { throw new CaptionSessionException($"Google text translation network request failed ({error.HttpRequestError}). Check the connection and restart."); }
         catch { throw new CaptionSessionException("Google text translation could not complete. Check the network and restart."); }
+    }
+
+    private sealed class TransientServiceException(int status) : Exception
+    {
+        public int Status { get; } = status;
+    }
+
+    private async Task<string> TranslateOnceAsync(string source, CancellationToken token)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post,
+            $"https://generativelanguage.googleapis.com/v1beta/models/{Model}:generateContent")
+        { Content = JsonContent.Create(CreateRequest(source, _previousSource)) };
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+        if (!response.IsSuccessStatusCode)
+        {
+            var code = (int)response.StatusCode;
+            if (code is 500 or 502 or 503 or 504) throw new TransientServiceException(code);
+            throw new CaptionSessionException(code switch
+            {
+                401 or 403 => $"Google text translation denied access (HTTP {code}). Check API key restrictions, billing, and Flash model access.",
+                429 => "Google text translation quota was exceeded (HTTP 429). Check quota and billing before restarting.",
+                400 or 404 => $"Google rejected the Flash translation model or configuration (HTTP {code}).",
+                _ => $"Google text translation failed (HTTP {code}). Restart when the connection or service recovers."
+            });
+        }
+        using var stream = await response.Content.ReadAsStreamAsync(token);
+        using var memory = new MemoryStream();
+        var buffer = new byte[8192];
+        int length;
+        while ((length = await stream.ReadAsync(buffer, token)) != 0)
+        {
+            if (memory.Length + length > 1024 * 1024) throw new CaptionSessionException("Google text translation response exceeded the size limit.");
+            memory.Write(buffer, 0, length);
+        }
+        using var json = JsonDocument.Parse(memory.GetBuffer().AsMemory(0, (int)memory.Length));
+        return ParseResponse(json.RootElement).Replace(_key, "[REDACTED]", StringComparison.Ordinal);
     }
 
     public static string ParseResponse(JsonElement response)

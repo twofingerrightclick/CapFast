@@ -125,6 +125,8 @@ internal static class ControllerChecks
         var raceClears = 0; race.CaptionsCleared += () => raceClears++;
         void Drain() { while (deferred.TryDequeue(out var action)) action(); }
         await race.ToggleAsync();
+        raceSession.EmitDiagnostic("Recovery may have left an unfinished caption."); Drain();
+        Require(race.Errors.Entries.Count == 1 && !race.IsPaused, "Recovery diagnostic was hidden or stopped capture");
         raceSession.Emit("Keep on screen"); raceSession.EmitActivity(AudioActivity.Music); Drain();
         raceClock.Advance(10); var oldTimeout = deferred.Dequeue();
         raceSession.EmitActivity(AudioActivity.Idle); raceSession.EmitActivity(AudioActivity.Music); Drain();
@@ -132,6 +134,8 @@ internal static class ControllerChecks
         Require(raceClears == 0 && race.Text.Length > 0, "Queued old music timeout cleared a newer music interval");
         raceClock.Advance(10); var pausedTimeout = deferred.Dequeue();
         await race.PauseAsync(); pausedTimeout();
+        raceSession.EmitDiagnostic("Stale recovery notice"); Drain();
+        Require(race.Errors.Entries.Count == 1, "Stale recovery diagnostics survived pause");
         Require(raceClears == 0 && race.Text.Length > 0, "Queued music timeout cleared captions after pause");
         await race.ShutdownAsync();
         Console.WriteLine("Controller checks passed: paused startup, selected source, pause during connect, rapid resume, stale callbacks, retained captions, shutdown, missing configuration, rolling log.");
@@ -173,12 +177,14 @@ internal static class ControllerChecks
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.Delay(Timeout.Infinite, cancellationToken);
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
-    private sealed class FakeSession : ICaptionSession, IAudioActivitySession
+    private sealed class FakeSession : ICaptionSession, IAudioActivitySession, ICaptionDiagnosticsSession
     {
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool Disposed { get; private set; }
         public event Action<CaptionUpdate>? Caption;
         public event Action<AudioActivity>? AudioActivityChanged;
+        public event Action<string>? Diagnostic;
+        public void EmitDiagnostic(string message) => Diagnostic?.Invoke(message);
         public void EmitActivity(AudioActivity activity) => AudioActivityChanged?.Invoke(activity);
         public event Action<string>? Status { add { } remove { } }
         public event Action<string>? Ended { add { } remove { } }

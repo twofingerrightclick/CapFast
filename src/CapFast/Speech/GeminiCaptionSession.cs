@@ -1,40 +1,49 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text.Json;
+using System.Threading.Channels;
 using CapFast.Core;
 
 namespace CapFast.Speech;
 
-public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySession
+public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySession, ICaptionDiagnosticsSession
 {
     private sealed class Connection : IDisposable
     {
-        public readonly ClientWebSocket Socket = new();
+        public readonly ILiveTransport Transport;
         public readonly TaskCompletionSource Setup = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public readonly GeminiTranscript Transcript = new();
         public readonly GeminiInputTranscript InputTranscript = new();
-        public readonly AudioConnectionPolicy Policy = new(Now);
+        public readonly AudioConnectionPolicy Policy;
         public readonly CancellationTokenSource Lifetime;
+        public readonly double OpenedAt;
         public Task? Receiver;
         public int PlannedClose;
-        public Connection(string apiKey, CancellationToken lifetime)
+        public int RolloverRequested;
+        public int TransportFailed;
+        public bool UploadedAny;
+        public bool StreamEnded;
+        public Connection(ILiveTransport transport, CancellationToken lifetime, double now)
         {
+            Transport = transport;
             Lifetime = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-            Socket.Options.SetRequestHeader("x-goog-api-key", apiKey);
-            Socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
-            Socket.Options.CollectHttpResponseDetails = true;
+            Policy = new(now);
+            OpenedAt = now;
         }
-        public void Dispose() { Socket.Dispose(); Lifetime.Dispose(); }
+        public void Dispose() { Transport.Dispose(); Lifetime.Dispose(); }
     }
-    private static double Now => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
-    private readonly string _apiKey;
     private readonly CancellationTokenSource _lifetime = new();
+    private readonly Func<ILiveTransport> _transportFactory;
+    private readonly ILiveClock _clock;
+    private readonly LiveRetryBudget _retries = new();
+    private double Now => _clock.Now;
     private Connection? _connection;
     private readonly GoogleCaptionMode _mode;
     private readonly FlashTextTranslator? _translator;
     private readonly SourceTranslationPipeline? _pipeline;
     private Process? _microphone;
     private Task? _sendAudio;
+    private Task? _readAudio;
     private Task? _monitorAudio;
     private int _started;
     private int _disposed;
@@ -42,16 +51,22 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     private readonly string? _audioDeviceId;
     private CaptionSessionException? _failure;
 
+    public event Action<string>? Diagnostic;
     public event Action<AudioActivity>? AudioActivityChanged;
     public event Action<CaptionUpdate>? Caption;
     public event Action<string>? Status;
     public event Action<string>? Ended;
 
     public GeminiCaptionSession(string apiKey, string? audioDeviceId = null, GoogleCaptionMode mode = GoogleCaptionMode.TwoStage)
+        : this(apiKey, audioDeviceId, mode, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock()) { }
+
+    internal GeminiCaptionSession(string apiKey, string? audioDeviceId, GoogleCaptionMode mode,
+        Func<ILiveTransport> transportFactory, ILiveClock clock)
     {
         if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("A Gemini API key is required.");
         // Same header authentication used by Google's native Live SDK; no key in URLs/logs.
-        _apiKey = apiKey.Trim();
+        _transportFactory = transportFactory;
+        _clock = clock;
         _audioDeviceId = audioDeviceId;
         _mode = mode;
         if (mode == GoogleCaptionMode.TwoStage)
@@ -80,7 +95,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         try
         {
             Status?.Invoke("Microphone permission granted. Connecting to Gemini…");
-            await ConnectAsync(timeout.Token);
+            await EnsureConnectedAsync(token: timeout.Token);
             stage = "setup";
             timeout.Token.ThrowIfCancellationRequested();
             // Capture begins only after the service accepts setup; permission was checked first.
@@ -104,19 +119,19 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             _lifetime.Cancel();
-            _connection?.Socket.Abort();
+            _connection?.Transport.Abort();
             throw;
         }
         catch (Exception error)
         {
             _lifetime.Cancel();
-            _connection?.Socket.Abort();
+            _connection?.Transport.Abort();
             // Never expose server responses, HTTP exceptions, or credentials to the UI.
             if (error is CaptionSessionException safe) throw safe;
             if (_failure is not null) throw _failure;
             if (stage == "connection")
             {
-                var status = (int)(_connection?.Socket.HttpStatusCode ?? 0);
+                var status = (int)(_connection?.Transport.HttpStatus ?? 0);
                 throw new CaptionSessionException(status > 0 ? ServiceFailure(status, "connection HTTP")
                     : "Gemini connection failed before setup. Check internet access, DNS, firewall, and the Gemini endpoint.");
             }
@@ -202,181 +217,293 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
 
     private async Task ConnectAsync(CancellationToken token)
     {
-        var connection = new Connection(_apiKey, _lifetime.Token);
+        var connection = new Connection(_transportFactory(), _lifetime.Token, Now);
         _connection = connection;
-        await connection.Socket.ConnectAsync(new Uri("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"), token);
+        await connection.Transport.ConnectAsync(token);
         connection.Receiver = ReceiveAsync(connection);
         await SendAsync(connection, GoogleLiveProtocol.CreateSetup(_mode), token);
         await connection.Setup.Task.WaitAsync(token);
     }
 
-    private static Task SendAsync(Connection connection, object message, CancellationToken token) => connection.Socket.SendAsync(
-        new ArraySegment<byte>(JsonSerializer.SerializeToUtf8Bytes(message)), WebSocketMessageType.Text, true, token);
+    private static Task SendAsync(Connection connection, object message, CancellationToken token) =>
+        connection.Transport.SendAsync(JsonSerializer.SerializeToUtf8Bytes(message), token);
 
-    private async Task CloseIdleAsync(Connection connection)
+    private async Task CloseConnectionAsync(Connection connection)
     {
         Interlocked.Exchange(ref connection.PlannedClose, 1);
-        // This is a deliberate local idle close, not retrying a server policy error.
         connection.Lifetime.Cancel();
-        connection.Socket.Abort();
-        if (connection.Receiver is { } receiver)
-            await receiver;
+        connection.Transport.Abort();
+        if (connection.Receiver is { } receiver) await receiver;
         if (ReferenceEquals(_connection, connection)) _connection = null;
         connection.Dispose();
+    }
+
+    private static bool TerminalCloseReason(string? reason)
+    {
+        if (reason is null) return false;
+        return new[] { "api key", "unauth", "quota", "resource_exhausted", "rate limit", "billing", "payment",
+            "permission", "access denied", "unregistered caller", "invalid", "unknown field", "unknown name", "malformed", "model", "configuration" }
+            .Any(word => reason.Contains(word, StringComparison.OrdinalIgnoreCase));
+    }
+    private static bool RetryableClose(int code, string? reason)
+    {
+        if (TerminalCloseReason(reason)) return false;
+        if (code == 1006) return true;
+        return code == 1011 && reason is not null &&
+            new[] { "internal error", "internal server", "temporarily unavailable", "service unavailable" }
+                .Any(word => reason.Contains(word, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task EnsureConnectedAsync(bool recovering = false, CancellationToken token = default)
+    {
+        if (token == default) token = _lifetime.Token;
+        while (!token.IsCancellationRequested)
+        {
+            if (recovering)
+            {
+                var delay = _retries.NextDelay();
+                Status?.Invoke("Google connection interrupted — reconnecting…");
+                await _clock.Delay(delay, token);
+            }
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(8));
+            try { await ConnectAsync(timeout.Token); return; }
+            catch (Exception error) when (!token.IsCancellationRequested)
+            {
+                var connection = _connection;
+                var status = connection?.Transport.HttpStatus ?? 0;
+                var retryable = error is TransientLiveException ||
+                    error is WebSocketException && (status == 0 || status is 500 or 502 or 503 or 504) ||
+                    error is OperationCanceledException && timeout.IsCancellationRequested;
+                if (connection is not null) await CloseConnectionAsync(connection);
+                if (!retryable)
+                    throw error is CaptionSessionException safe ? safe : new CaptionSessionException(status >= 400
+                        ? ServiceFailure(status, "connection HTTP") : "Google connection or setup failed. Check the model, credentials, and network.");
+                recovering = true;
+            }
+        }
+        token.ThrowIfCancellationRequested();
+    }
+
+    private async Task RotateAsync(Connection connection, bool transportFailure)
+    {
+        if (!transportFailure && connection.UploadedAny && !connection.StreamEnded)
+        {
+            try { await EndAudioAsync(connection); }
+            catch (Exception error) when (error is WebSocketException or OperationCanceledException && !_lifetime.IsCancellationRequested)
+            { transportFailure = true; }
+        }
+        if (!transportFailure && connection.UploadedAny)
+        {
+            var deadline = Now + 3;
+            while (!connection.Policy.Drained && Now < deadline)
+                await _clock.Delay(TimeSpan.FromMilliseconds(100), _lifetime.Token);
+        }
+        if (connection.UploadedAny && (!connection.Policy.Drained || transportFailure))
+        {
+            const string notice = "Google connection refreshed; unfinished transcription may be incomplete.";
+            Status?.Invoke(notice);
+            Diagnostic?.Invoke(notice);
+        }
+        await CloseConnectionAsync(connection);
+    }
+
+    private async Task EndAudioAsync(Connection connection)
+    {
+        if (!connection.UploadedAny || connection.StreamEnded) return;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        await SendAsync(connection, new { realtimeInput = new { audioStreamEnd = true } }, timeout.Token);
+        connection.StreamEnded = true;
+        connection.Policy.Ended(Now);
     }
 
     private async Task ReceiveAsync(Connection connection)
     {
         try
         {
-            var buffer = new byte[16384];
             while (!connection.Lifetime.IsCancellationRequested)
             {
-                using var message = new MemoryStream();
-                WebSocketReceiveResult result;
-                do
+                var message = await connection.Transport.ReceiveAsync(connection.Lifetime.Token);
+                if (message.Type == WebSocketMessageType.Close)
                 {
-                    result = await connection.Socket.ReceiveAsync(new ArraySegment<byte>(buffer), connection.Lifetime.Token);
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        if (Volatile.Read(ref connection.PlannedClose) != 0) return;
-                        var code = result.CloseStatus is { } close ? (int)close : 0;
-                        throw new CaptionSessionException(DescribeCloseFailure(code, result.CloseStatusDescription, connection.Setup.Task.IsCompletedSuccessfully));
-                    }
-                    if (result.MessageType is not (WebSocketMessageType.Text or WebSocketMessageType.Binary) || message.Length + result.Count > 2 * 1024 * 1024)
-                        throw new IOException("Invalid service frame.");
-                    message.Write(buffer, 0, result.Count);
-                } while (!result.EndOfMessage);
-                using var json = GoogleLiveProtocol.ParseMessage(message.GetBuffer().AsMemory(0, checked((int)message.Length)), result.MessageType);
+                    if (Volatile.Read(ref connection.PlannedClose) != 0) return;
+                    var code = message.CloseCode ?? 0;
+                    if (RetryableClose(code, message.CloseReason) ||
+                        Volatile.Read(ref connection.RolloverRequested) != 0 && !TerminalCloseReason(message.CloseReason) && code is 1000 or 1001 or 1012)
+                        throw new TransientLiveException();
+                    throw new CaptionSessionException(DescribeCloseFailure(code, message.CloseReason, connection.Setup.Task.IsCompletedSuccessfully));
+                }
+                using var json = GoogleLiveProtocol.ParseMessage(message.Data, message.Type);
                 var root = json.RootElement;
                 if (Volatile.Read(ref connection.PlannedClose) != 0 || !ReferenceEquals(_connection, connection)) return;
                 if (root.TryGetProperty("error", out var serviceError))
                 {
                     var code = serviceError.TryGetProperty("code", out var value) && value.TryGetInt32(out var number) ? number : 0;
+                    if (code is 500 or 503 or 13 or 14) throw new TransientLiveException();
                     throw new CaptionSessionException(ServiceFailure(code, "service"));
                 }
-                if (root.TryGetProperty("goAway", out _))
-                {
-                    Fail("Gemini session is expiring. Start again to reconnect.");
-                    return;
-                }
+                if (root.TryGetProperty("goAway", out _)) Interlocked.Exchange(ref connection.RolloverRequested, 1);
                 if (root.TryGetProperty("setupComplete", out _)) connection.Setup.TrySetResult();
-                // Audio output is deliberately discarded; captions use only output transcription.
-                if (_mode == GoogleCaptionMode.TwoStage)
+                var updates = _mode == GoogleCaptionMode.TwoStage ? connection.InputTranscript.Apply(root) : connection.Transcript.Apply(root);
+                foreach (var update in updates)
                 {
-                    foreach (var update in connection.InputTranscript.Apply(root))
+                    if (_lifetime.IsCancellationRequested) continue;
+                    connection.Policy.Transcript(update.IsFinal, Now);
+                    if (_pipeline is not null)
                     {
-                        if (_lifetime.IsCancellationRequested) continue;
-                        connection.Policy.Transcript(update.IsFinal, Now);
-                        if (!_pipeline!.TryAcceptTranscript(update, Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency))
+                        if (!_pipeline.TryAcceptTranscript(update, Now))
                             throw new CaptionSessionException("English translation fell behind the audio. Captions paused to avoid a growing delay; restart the session.");
                     }
+                    else Caption?.Invoke(update);
                 }
-                else foreach (var update in connection.Transcript.Apply(root))
-                    if (!_lifetime.IsCancellationRequested)
-                    {
-                        connection.Policy.Transcript(update.IsFinal, Now);
-                        Caption?.Invoke(update);
-                    }
             }
         }
         catch (OperationCanceledException) when (connection.Lifetime.IsCancellationRequested) { }
+        catch (Exception error) when (error is TransientLiveException or WebSocketException)
+        {
+            if (Volatile.Read(ref connection.PlannedClose) == 0)
+            {
+                Interlocked.Exchange(ref connection.TransportFailed, 1);
+                connection.Setup.TrySetException(new TransientLiveException());
+                connection.Transport.Abort();
+            }
+        }
         catch (CaptionSessionException safe) { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail(safe.Message); }
-        catch { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail("Gemini connection or response failed. Check the network and retry. Microphone permission was checked separately."); }
+        catch { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail("Gemini returned an invalid response. Capture paused; check service availability and start again."); }
         finally { connection.Setup.TrySetException(_failure ?? new CaptionSessionException("Gemini setup did not complete. Check the selected Google Live model and retry.")); }
     }
 
     private async Task SendAudioAsync(Process microphone)
     {
-        var uploading = false;
+        var frames = Channel.CreateBounded<ClassifiedAudioFrame>(new BoundedChannelOptions(200)
+        { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
+        _readAudio = ReadAudioAsync(microphone, frames.Writer);
+        try { await PumpAudioAsync(frames.Reader); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (CaptionSessionException safe) { Fail(safe.Message); }
+        catch { Fail("Google audio streaming failed. Check the network and restart the session."); }
+    }
+
+    private async Task ReadAudioAsync(Process microphone, ChannelWriter<ClassifiedAudioFrame> writer)
+    {
         try
         {
-            var packet = new byte[3201]; // Local class byte + 100 ms PCM16.
-            var gate = new SpeechAudioGate();
+            var packet = new byte[3201];
             var first = true;
-            var activity = AudioActivity.Idle;
-            AudioActivityChanged?.Invoke(activity);
             while (!_lifetime.IsCancellationRequested)
             {
-                // Quiet packets continue locally, so read timeout diagnoses the input
-                // helper without ever uploading silence to Google.
-                using var audioTimeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-                audioTimeout.CancelAfter(TimeSpan.FromSeconds(first ? 10 : 5));
-                uploading = false;
-                var length = await microphone.StandardOutput.BaseStream.ReadAtLeastAsync(packet, packet.Length, false, audioTimeout.Token);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+                timeout.CancelAfter(TimeSpan.FromSeconds(first ? 10 : 5));
+                var length = await microphone.StandardOutput.BaseStream.ReadAtLeastAsync(packet, packet.Length, false, timeout.Token);
                 if (length == 0) break;
                 if (length != packet.Length || packet[0] > (byte)AudioFrameKind.Music)
                     throw new CaptionSessionException("Mac speech classification returned an invalid frame. Capture stopped; restart the packaged app.");
-                if (first) { Status?.Invoke("Gemini live — listening for speech; silence and music stay on this Mac."); first = false; }
-                var decision = gate.Process(packet.AsSpan(1).ToArray(), (AudioFrameKind)packet[0]);
-                if (decision.Activity != activity)
-                {
-                    activity = decision.Activity;
-                    AudioActivityChanged?.Invoke(activity);
-                }
-                var connection = _connection;
-                connection?.Policy.ObserveActivity(decision.Activity, Now);
-                if (decision.Audio.Count > 0 && connection is null)
-                {
-                    Status?.Invoke("Speech detected — reconnecting to Gemini…");
-                    using var reconnect = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-                    reconnect.CancelAfter(TimeSpan.FromSeconds(10));
-                    try { await ConnectAsync(reconnect.Token); }
-                    catch (Exception error) when (!_lifetime.IsCancellationRequested)
-                    {
-                        throw new CaptionSessionException(error is CaptionSessionException safe ? safe.Message
-                            : "Gemini could not reconnect after silence. Check the network and start again.");
-                    }
-                    connection = _connection!;
-                    connection.Policy.ObserveActivity(decision.Activity, Now);
-                    Status?.Invoke("Gemini live — translating qualified speech.");
-                }
-                if (decision.EndStream && connection is not null)
-                {
-                    using var endTimeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-                    endTimeout.CancelAfter(TimeSpan.FromSeconds(5));
-                    uploading = true;
-                    await SendAsync(connection, new { realtimeInput = new { audioStreamEnd = true } }, endTimeout.Token);
-                    connection.Policy.Ended(Now);
-                }
-                foreach (var chunk in decision.Audio)
-                {
-                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
-                    timeout.CancelAfter(TimeSpan.FromSeconds(5));
-                    uploading = true;
-                    connection!.Policy.Uploaded(Now);
-                    await SendAsync(connection, new { realtimeInput = new { audio = new
-                    {
-                        mimeType = "audio/pcm;rate=16000", data = Convert.ToBase64String(chunk)
-                    } } }, timeout.Token);
-                }
-                if (connection is not null)
-                {
-                    var idle = connection.Policy.Poll(Now);
-                    if (idle == AudioConnectionDecision.TranscriptionTimeout)
-                        throw new CaptionSessionException("Google did not finish transcribing the accepted speech. Capture paused to avoid losing the unfinished caption; start again.");
-                    if (idle == AudioConnectionDecision.CloseIdle)
-                    {
-                        await CloseIdleAsync(connection);
-                        Status?.Invoke("Listening locally — Google reconnects when speech resumes.");
-                    }
-                }
+                first = false;
+                if (!writer.TryWrite(new(packet.AsSpan(1).ToArray(), (AudioFrameKind)packet[0])))
+                    throw new CaptionSessionException("Google connection recovery could not keep up with the audio. Capture paused before the bounded local queue overflowed.");
             }
             if (!_lifetime.IsCancellationRequested)
             {
-                // EOF and stderr completion race. Let the monitor report a fixed
-                // classifier/device error before replacing it with a generic message.
-                if (_monitorAudio is { } monitor)
-                    try { await monitor.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
+                if (_monitorAudio is { } monitor) try { await monitor.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
                 if (!_lifetime.IsCancellationRequested)
-                    Fail("The selected Mac audio input stopped producing audio. Check the input device and restart the session.");
+                    throw new CaptionSessionException("The selected Mac audio input stopped producing audio. Check the input device and restart the session.");
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (CaptionSessionException safe) { Fail(safe.Message); }
-        catch { Fail(uploading
-            ? "Gemini audio upload failed or timed out. Check the network and restart the session."
-            : "The selected Mac audio input stopped producing audio. Check the input device in Settings and restart the session."); }
+        catch { Fail("The selected Mac audio input stopped producing audio. Check the input device and restart the session."); }
+        finally { writer.TryComplete(); }
+    }
+
+    // The same pump is exercised by fake transports and the packaged microphone.
+    internal async Task RunClassifiedAudioAsync(ChannelReader<ClassifiedAudioFrame> frames)
+    {
+        try
+        {
+            await EnsureConnectedAsync();
+            await PumpAudioAsync(frames);
+        }
+        catch (OperationCanceledException) when (_failure is not null) { throw _failure; }
+    }
+
+    private async Task PumpAudioAsync(ChannelReader<ClassifiedAudioFrame> frames)
+    {
+        var gate = new SpeechAudioGate();
+        var activity = AudioActivity.Idle;
+        var recovering = false;
+        AudioActivityChanged?.Invoke(activity);
+        await foreach (var frame in frames.ReadAllAsync(_lifetime.Token))
+        {
+            var decision = gate.Process(frame.Pcm, frame.Kind);
+            if (decision.Activity != activity) { activity = decision.Activity; AudioActivityChanged?.Invoke(activity); }
+            var connection = _connection;
+            if (connection is not null)
+            {
+                connection.Policy.ObserveActivity(decision.Activity, Now);
+                var failed = Volatile.Read(ref connection.TransportFailed) != 0;
+                if (failed || Volatile.Read(ref connection.RolloverRequested) != 0 || Now - connection.OpenedAt >= 480)
+                {
+                    await RotateAsync(connection, failed);
+                    recovering |= failed;
+                    connection = null;
+                }
+            }
+            if (decision.Audio.Count > 0 && connection is null)
+            {
+                Status?.Invoke("Speech detected — connecting to Google…");
+                await EnsureConnectedAsync(recovering);
+                recovering = false;
+                connection = _connection!;
+                connection.Policy.ObserveActivity(decision.Activity, Now);
+                Status?.Invoke("Google live — translating qualified speech.");
+            }
+            if (decision.EndStream && connection is not null)
+            {
+                try { await EndAudioAsync(connection); }
+                catch (Exception error) when (error is WebSocketException or OperationCanceledException && !_lifetime.IsCancellationRequested)
+                {
+                    await RotateAsync(connection, true); recovering = true; connection = null;
+                }
+            }
+            foreach (var chunk in decision.Audio)
+            {
+                if (connection is null)
+                {
+                    await EnsureConnectedAsync(recovering); recovering = false; connection = _connection!;
+                    connection.Policy.ObserveActivity(decision.Activity, Now);
+                }
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                connection.Policy.Uploaded(Now);
+                connection.UploadedAny = true;
+                connection.StreamEnded = false;
+                try
+                {
+                    await SendAsync(connection, new { realtimeInput = new { audio = new
+                    { mimeType = "audio/pcm;rate=16000", data = Convert.ToBase64String(chunk) } } }, timeout.Token);
+                    _retries.AudioSucceeded();
+                }
+                catch (Exception error) when (error is WebSocketException or OperationCanceledException && !_lifetime.IsCancellationRequested)
+                {
+                    // The provider may already have received this frame. Replaying it
+                    // blindly would duplicate speech; preserve all later queued frames.
+                    await RotateAsync(connection, true); recovering = true; connection = null;
+                }
+            }
+            if (connection is not null)
+            {
+                var idle = connection.Policy.Poll(Now);
+                if (idle == AudioConnectionDecision.TranscriptionTimeout)
+                    throw new CaptionSessionException("Google did not finish transcribing the accepted speech. Capture paused to avoid losing the unfinished caption; start again.");
+                if (idle == AudioConnectionDecision.CloseIdle)
+                {
+                    await CloseConnectionAsync(connection);
+                    _retries.Reset();
+                    Status?.Invoke("Listening locally — Google reconnects when speech resumes.");
+                }
+            }
+        }
     }
 
     private async Task MonitorAudioAsync(Process microphone)
@@ -419,7 +546,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         _failure = new CaptionSessionException(message);
         _connection?.Setup.TrySetException(_failure);
         _lifetime.Cancel();
-        _connection?.Socket.Abort();
+        _connection?.Transport.Abort();
         try { if (_microphone is { HasExited: false }) _microphone.Kill(); } catch { }
         if (_microphone is not null) Ended?.Invoke(message);
     }
@@ -428,10 +555,10 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _lifetime.Cancel();
-        _connection?.Socket.Abort();
+        _connection?.Transport.Abort();
         try { if (_microphone is { HasExited: false }) _microphone.Kill(); } catch { }
         if (_pipeline is not null) await _pipeline.DisposeAsync();
-        var completion = Task.WhenAll(new[] { _connection?.Receiver, _sendAudio, _monitorAudio }.OfType<Task>());
+        var completion = Task.WhenAll(new[] { _connection?.Receiver, _sendAudio, _readAudio, _monitorAudio }.OfType<Task>());
         try { await completion.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
         _microphone?.Dispose();
         _connection?.Dispose();

@@ -21,6 +21,8 @@
     <Compile Include="../../src/CapFast/Speech/ICaptionSession.cs" Link="ICaptionSession.cs" />
     <Compile Include="../../src/CapFast/Core/LocalConfiguration.cs" Link="LocalConfiguration.cs" />
     <Compile Include="../../src/CapFast/Speech/CaptionSessionException.cs" Link="CaptionSessionException.cs" />
+    <Compile Include="../../src/CapFast/Speech/ICaptionDiagnosticsSession.cs" Link="ICaptionDiagnosticsSession.cs" />
+    <Compile Include="../../src/CapFast/Speech/LiveTransport.cs" Link="LiveTransport.cs" />
     <Compile Include="../../src/CapFast/Speech/GeminiCaptionSession.cs" Link="GeminiCaptionSession.cs" />
     <Compile Include="../../src/CapFast/Core/GoogleCaptionMode.cs" Link="GoogleCaptionMode.cs" />
     <Compile Include="../../src/CapFast/Core/GeminiInputTranscript.cs" Link="GeminiInputTranscript.cs" />

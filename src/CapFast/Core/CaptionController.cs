@@ -134,6 +134,12 @@ public sealed class CaptionController
                         if (generation != _generation || !_wantLive || AudioActivity == activity) return;
                         SetAudioActivity(activity, generation);
                     });
+                if (session is ICaptionDiagnosticsSession diagnostics)
+                    diagnostics.Diagnostic += message => _dispatch(() =>
+                    {
+                        if (generation != _generation || !_wantLive) return;
+                        Errors.Add(message); Changed?.Invoke();
+                    });
                 session.Caption += update => _dispatch(() =>
                 {
                     if (generation == _generation && _wantLive) ApplyCaption(update);

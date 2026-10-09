@@ -32,6 +32,8 @@ public sealed class AudioConnectionPolicy
     {
         lock (_lock) { _partial = !final; if (final) _lastFinal = now; }
     }
+    public bool Drained
+    { get { lock (_lock) return !_partial && (_lastUpload is null || _lastFinal >= _lastUpload); } }
     public AudioConnectionDecision Poll(double now)
     {
         lock (_lock)
