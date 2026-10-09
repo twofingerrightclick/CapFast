@@ -94,9 +94,76 @@ internal static class ControllerChecks
         Require(gated.IsPaused && gatedStarts == 0 && gated.Status.Contains("reading fell behind"), "Early resume started capture with a full display backlog");
         await gated.RunDemoAsync();
         Require(gated.IsPaused && gated.CaptionUtteranceId is null, "Demo bypassed the reading backlog guard");
+        var clock = new ManualClock();
+        var musicSession = new FakeSession(); musicSession.Started.SetResult();
+        var musicController = new CaptionController(settings, _ => musicSession, a => a(), clock);
+        var musicClears = 0;
+        musicController.CaptionsCleared += () => musicClears++;
+        await musicController.ToggleAsync();
+        musicSession.Emit("Retained captions");
+        musicSession.EmitActivity(AudioActivity.Music);
+        clock.Advance(9);
+        Require(musicClears == 0 && musicController.Text.Length > 0, "Music cleared captions before ten seconds");
+        musicSession.EmitActivity(AudioActivity.Music);
+        clock.Advance(1);
+        Require(musicClears == 1 && musicController.Text == "", "Continuous music did not clear visible and queued captions once");
+        musicSession.Emit("Late translation"); clock.Advance(20);
+        Require(musicClears == 1 && musicController.Text == "", "Late translation refilled captions during music");
+        musicSession.EmitActivity(AudioActivity.Speech); musicSession.Emit("Speech resumed");
+        Require(musicController.Text == "Speech resumed", "Speech after music did not restore captions");
+        musicSession.EmitActivity(AudioActivity.Music); clock.Advance(5);
+        musicSession.EmitActivity(AudioActivity.Idle); clock.Advance(20);
+        Require(musicClears == 1 && musicController.Text.Length > 0, "Interrupted music cleared captions");
+        musicSession.EmitActivity(AudioActivity.Music); clock.Advance(9);
+        await musicController.PauseAsync(); clock.Advance(20);
+        Require(musicClears == 1 && musicController.Text.Length > 0, "Music timer cleared retained captions after pause");
+        await musicController.ShutdownAsync();
+        var deferred = new Queue<Action>();
+        var raceClock = new ManualClock();
+        var raceSession = new FakeSession(); raceSession.Started.SetResult();
+        var race = new CaptionController(settings, _ => raceSession, deferred.Enqueue, raceClock);
+        var raceClears = 0; race.CaptionsCleared += () => raceClears++;
+        void Drain() { while (deferred.TryDequeue(out var action)) action(); }
+        await race.ToggleAsync();
+        raceSession.Emit("Keep on screen"); raceSession.EmitActivity(AudioActivity.Music); Drain();
+        raceClock.Advance(10); var oldTimeout = deferred.Dequeue();
+        raceSession.EmitActivity(AudioActivity.Idle); raceSession.EmitActivity(AudioActivity.Music); Drain();
+        oldTimeout();
+        Require(raceClears == 0 && race.Text.Length > 0, "Queued old music timeout cleared a newer music interval");
+        raceClock.Advance(10); var pausedTimeout = deferred.Dequeue();
+        await race.PauseAsync(); pausedTimeout();
+        Require(raceClears == 0 && race.Text.Length > 0, "Queued music timeout cleared captions after pause");
+        await race.ShutdownAsync();
         Console.WriteLine("Controller checks passed: paused startup, selected source, pause during connect, rapid resume, stale callbacks, retained captions, shutdown, missing configuration, rolling log.");
     }
     private static void Require(bool valid, string message) { if (!valid) throw new Exception(message); }
+    private sealed class ManualClock : TimeProvider
+    {
+        private readonly List<ManualTimer> _timers = new();
+        private double _seconds;
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = new ManualTimer(callback, state, _seconds + dueTime.TotalSeconds);
+            _timers.Add(timer); return timer;
+        }
+        public void Advance(double seconds)
+        {
+            _seconds += seconds;
+            foreach (var timer in _timers.ToArray()) timer.FireIfDue(_seconds);
+        }
+        private sealed class ManualTimer(TimerCallback callback, object? state, double due) : ITimer
+        {
+            private bool _disposed;
+            public void FireIfDue(double now)
+            {
+                if (_disposed || now < due) return;
+                _disposed = true; callback(state);
+            }
+            public bool Change(TimeSpan dueTime, TimeSpan period) => throw new NotSupportedException();
+            public void Dispose() => _disposed = true;
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
     private sealed class CancellableSession : ICaptionSession
     {
         public bool Disposed { get; private set; }

@@ -1,7 +1,7 @@
 namespace CapFast.Core;
 
 public enum AudioFrameKind : byte { Quiet = 0, Speech = 1, Music = 2 }
-public enum AudioActivity { Idle, Speech }
+public enum AudioActivity { Idle, Speech, Music }
 public sealed record SpeechGateResult(AudioActivity Activity, IReadOnlyList<byte[]> Audio, bool EndStream);
 
 // Operates on locally classified 100 ms PCM frames. Qualification counts speech,
@@ -25,7 +25,7 @@ public sealed class SpeechAudioGate
         {
             var end = _open;
             Reset();
-            return new(AudioActivity.Idle, Array.Empty<byte[]>(), end);
+            return new(AudioActivity.Music, Array.Empty<byte[]>(), end);
         }
         if (kind == AudioFrameKind.Quiet)
         {

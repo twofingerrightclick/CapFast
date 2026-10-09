@@ -39,7 +39,7 @@ public static class SpeechAudioGateChecks
         Check(accepted.Audio.Count == 20 && accepted.Audio.Select(frame => frame[0]).SequenceEqual(Enumerable.Range(0, 20).Select(i => (byte)i)),
             "Qualification discarded or reordered the opening speech.");
         var music = gate.Process(Frame(20), AudioFrameKind.Music);
-        Check(music.Audio.Count == 0 && music.EndStream && music.Activity == AudioActivity.Idle && !gate.IsOpen,
+        Check(music.Audio.Count == 0 && music.EndStream && music.Activity == AudioActivity.Music && !gate.IsOpen,
             "Music was uploaded or failed to close qualified speech immediately.");
         Check(!gate.Process(Frame(20), AudioFrameKind.Music).EndStream, "Music repeatedly ended an already closed stream.");
         for (var i = 0; i < 19; i++) gate.Process(Frame(i), AudioFrameKind.Speech);

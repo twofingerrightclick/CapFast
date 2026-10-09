@@ -44,6 +44,7 @@ public sealed class CaptionWindow : Window
     private readonly Control _pauseIcon;
     private readonly Canvas _audioIndicator = new() { Width = 32, Height = 24, VerticalAlignment = VerticalAlignment.Center };
     private readonly Border _idleDot = new() { Width = 8, Height = 8, CornerRadius = new CornerRadius(4), Background = new SolidColorBrush(Color.Parse("#59B8FF")) };
+    private readonly TextBlock _musicIcon = new() { Text = "♫", FontSize = 22, Foreground = new SolidColorBrush(Color.Parse("#59B8FF")), IsVisible = false };
     private readonly List<Border> _listeningDots = new();
     private readonly DispatcherTimer _activityTimer = new() { Interval = TimeSpan.FromMilliseconds(40) };
     private readonly System.Diagnostics.Stopwatch _activityClock = System.Diagnostics.Stopwatch.StartNew();
@@ -98,6 +99,7 @@ public sealed class CaptionWindow : Window
             } };
         ToolTip.SetTip(_pauseIcon, "Paused — press Space to start");
         Canvas.SetLeft(_idleDot, 12); Canvas.SetTop(_idleDot, 8); _audioIndicator.Children.Add(_idleDot);
+        Canvas.SetLeft(_musicIcon, 5); Canvas.SetTop(_musicIcon, -3); _audioIndicator.Children.Add(_musicIcon);
         for (var index = 0; index < 3; index++)
         {
             var dot = new Border { Width = 5, Height = 5, CornerRadius = new CornerRadius(2.5),
@@ -164,10 +166,12 @@ public sealed class CaptionWindow : Window
         _pauseIcon.IsVisible = paused;
         _audioIndicator.IsVisible = !paused && _controller.HasAudioActivity;
         var listening = _audioIndicator.IsVisible && _controller.AudioActivity == AudioActivity.Speech;
-        _idleDot.IsVisible = !listening;
+        var music = _audioIndicator.IsVisible && _controller.AudioActivity == AudioActivity.Music;
+        _musicIcon.IsVisible = music;
+        _idleDot.IsVisible = !listening && !music;
         foreach (var dot in _listeningDots) dot.IsVisible = listening;
-        ToolTip.SetTip(_audioIndicator, listening ? "Speech detected — qualifying or transcribing" : "Listening — no qualifying speech; music and singing are skipped");
-        Avalonia.Automation.AutomationProperties.SetName(_audioIndicator, listening ? "Speech detected" : "Listening for speech");
+        ToolTip.SetTip(_audioIndicator, music ? "Music detected — captions clear after ten seconds" : listening ? "Speech detected — qualifying or transcribing" : "Listening — no qualifying speech; music and singing are skipped");
+        Avalonia.Automation.AutomationProperties.SetName(_audioIndicator, music ? "Music detected" : listening ? "Speech detected" : "Listening for speech");
         if (listening) { AnimateAudioActivity(); _activityTimer.Start(); }
         else _activityTimer.Stop();
         _status.Text = paused ? $"{_controller.Status}  ·  {(OperatingSystem.IsMacOS() ? "⌘, settings" : "Ctrl+, settings")}" : _controller.State == CaptionState.Live ? "" : _controller.Status;
