@@ -1,0 +1,55 @@
+using CapFast.Core;
+using System.Globalization;
+
+public static class CaptionLayoutChecks
+{
+    public static void Run()
+    {
+        var layout = new CaptionLineLayout();
+        IReadOnlyList<string> Update(string text) => layout.Update(text, 7, value => value.Length);
+        Equal("one", Update("one"));
+        Equal("one two", Update("one two"));
+        Equal("one two|three", Update("one two three"));
+        Equal("one two|three|four", Update("one two three four"));
+        Equal("five", Update("one two three four five"));
+        Equal("five|six", Update("one two three four five six"));
+        // Losing old controller head words must not change the current page anchor.
+        Equal("five|six|seven", Update("three four five six seven"));
+        Equal("five|six|eight", Update("three four five six eight"));
+        Equal("five|six", Update("three four five six"));
+
+        var batch = new CaptionLineLayout();
+        Equal("a b c d e|f g h i j|k l", batch.Update("a b c d e f g h i j k l", 10, value => value.Length));
+        Equal("m n o p q|r s", batch.Update("a b c d e f g h i j k l m n o p q r s", 10, value => value.Length));
+
+        var repeat = new CaptionLineLayout();
+        Equal("yes|yes|yes", repeat.Update("yes yes yes", 3, value => value.Length));
+        Equal("yes", repeat.Update("yes yes yes yes", 3, value => value.Length));
+        Equal("yes|yes", repeat.Update("yes yes yes yes yes", 3, value => value.Length));
+        Equal("yes", repeat.Update("yes yes yes yes", 3, value => value.Length));
+        Equal("yes|yes|yes", repeat.Update("yes yes yes", 3, value => value.Length));
+
+        var corrected = new CaptionLineLayout();
+        Equal("red blue|green", corrected.Update("red blue green", 8, value => value.Length));
+        Equal("red blue|longer|phrase", corrected.Update("red blue longer phrase", 8, value => value.Length));
+        Equal("red blue|short", corrected.Update("red blue short", 8, value => value.Length));
+        var resized = corrected.Update("red blue short", 4, value => value.Length);
+        if (resized.Count > 3 || resized.Any(line => line.Length > 4)) throw new Exception("Resize exceeded the caption row/width limit.");
+        Equal("", corrected.Update("", 4, value => value.Length));
+
+        var unicode = new CaptionLineLayout();
+        var word = string.Concat(Enumerable.Repeat("👋🏽", 7));
+        var lines = unicode.Update(word, 2, value => StringInfo.ParseCombiningCharacters(value).Length);
+        Equal("👋🏽", lines); // Three full rows completed; next grapheme starts the new page.
+        if (lines.Any(line => StringInfo.ParseCombiningCharacters(line).Length > 2)) throw new Exception("Unicode wrapping split or overflowed a text element.");
+        var oneRow = new CaptionLineLayout();
+        Equal("three", oneRow.Update("one two three", 7, value => value.Length, rows: 1));
+        Console.WriteLine("Caption layout checks passed: fixed rows, whole-page overflow, bounded-tail overlap, revisions, repeated words, resize, Unicode, and narrow-height fallback.");
+    }
+
+    private static void Equal(string expected, IReadOnlyList<string> actual)
+    {
+        var joined = string.Join("|", actual);
+        if (joined != expected) throw new Exception($"Caption page expected '{expected}', got '{joined}'.");
+    }
+}

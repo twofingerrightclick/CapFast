@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/CapFast/Core/LocalConfiguration.cs" Link="LocalConfiguration.cs" />
+    <Compile Include="../../src/CapFast/Core/CaptionBuffer.cs" Link="CaptionBuffer.cs" />
+    <Compile Include="../../src/CapFast/Core/GeminiTranscript.cs" Link="GeminiTranscript.cs" />
+    <Compile Include="../../src/CapFast/Core/GoogleCaptionMode.cs" Link="GoogleCaptionMode.cs" />
+    <Compile Include="../../src/CapFast/Core/GeminiInputTranscript.cs" Link="GeminiInputTranscript.cs" />
+    <Compile Include="../../src/CapFast/Speech/GoogleLiveProtocol.cs" Link="GoogleLiveProtocol.cs" />
+    <Compile Include="../../src/CapFast/Speech/FlashTextTranslator.cs" Link="FlashTextTranslator.cs" />
+    <Compile Include="../../src/CapFast/Speech/SourceTranslationPipeline.cs" Link="SourceTranslationPipeline.cs" />
+    <Compile Include="../../src/CapFast/Speech/CaptionSessionException.cs" Link="CaptionSessionException.cs" />
+  </ItemGroup>
+</Project>

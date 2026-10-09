@@ -1,0 +1,23 @@
+{
+  "dataset": "Google FLEURS",
+  "license": "CC-BY-4.0",
+  "credit": "Google FLEURS dataset contributors",
+  "split": "dev",
+  "id": 1539,
+  "sourceLanguage": "sw",
+  "referenceLanguage": "en",
+  "sourceText": "Wanachama wa utamaduni mdogo mdogo kwa mara nyingi huashiria uanachama wao kupitia mitindo ya kipekee ambayo ni pamoja na mitindo ya kimavazi, tabia na lugha.",
+  "referenceText": "Members of a subculture often signal their membership through a distinctive and symbolic use of style, which includes fashions, mannerisms, and argot.",
+  "audioFilename": "11189033687341333958.wav",
+  "localAudio": "08-fleurs-1539.wav",
+  "audioSHA256": "d36212d1c1ef71f2e3d641c789afa193c81e344784e57f7c8f9462e68b2ef57c",
+  "audioSamples": 272640,
+  "audioSeconds": 17.04,
+  "genderMetadata": "MALE",
+  "sources": [
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/sw_ke/dev.tsv",
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/en_us/dev.tsv",
+    "https://storage.googleapis.com/xtreme_translations/FLEURS/sw_ke.tar.gz"
+  ],
+  "verification": "Exact official Swahili filename/sentence ID joined to a unique official English text with the same sentence ID; original WAV data duration verified against metadata."
+}

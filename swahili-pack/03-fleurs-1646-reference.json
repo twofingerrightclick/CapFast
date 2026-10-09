@@ -1,0 +1,23 @@
+{
+  "dataset": "Google FLEURS",
+  "license": "CC-BY-4.0",
+  "credit": "Google FLEURS dataset contributors",
+  "split": "dev",
+  "id": 1646,
+  "sourceLanguage": "sw",
+  "referenceLanguage": "en",
+  "sourceText": "Kuna fukwe nyingi, kutokana na kukaliwa magamaga kwa kwa bandari mbili na Auckland. Maarufu zaidi ziko katika sehemu tatu.",
+  "referenceText": "There are many beaches, due to Auckland's straddling of two harbours. The most popular ones are in three areas.",
+  "audioFilename": "10285356563956785652.wav",
+  "localAudio": "03-fleurs-1646.wav",
+  "audioSHA256": "c542dc7f8a9d72f9bb8cc2fae1f62f358e373be57b1e451f06af33805e76edd8",
+  "audioSamples": 226560,
+  "audioSeconds": 14.16,
+  "genderMetadata": "FEMALE",
+  "sources": [
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/sw_ke/dev.tsv",
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/en_us/dev.tsv",
+    "https://storage.googleapis.com/xtreme_translations/FLEURS/sw_ke.tar.gz"
+  ],
+  "verification": "Exact official Swahili filename/sentence ID joined to a unique official English text with the same sentence ID; original WAV data duration verified against metadata."
+}

@@ -1,0 +1,91 @@
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Themes.Fluent;
+using Avalonia.Threading;
+using CapFast.Core;
+using CapFast.Speech;
+using CapFast.Views;
+
+namespace CapFast;
+
+internal static class Program
+{
+    [STAThread]
+    public static void Main(string[] args) => AppBuilder.Configure<App>()
+        .UsePlatformDetect().LogToTrace().StartWithClassicDesktopLifetime(args);
+}
+
+public sealed class App : Application
+{
+    private CaptionController? _controller;
+    private CaptionWindow? _captions;
+    private SettingsWindow? _settings;
+    private ErrorLogWindow? _errors;
+    public override void Initialize()
+    {
+        Name = "CapFast";
+        var menu = new NativeMenu();
+        var settingsItem = new NativeMenuItem("Settings…")
+        { Gesture = new KeyGesture(Key.OemComma, OperatingSystem.IsMacOS() ? KeyModifiers.Meta : KeyModifiers.Control) };
+        settingsItem.Click += (_, _) => ShowSettings();
+        var errorsItem = new NativeMenuItem("Errors…");
+        errorsItem.Click += (_, _) => ShowErrors();
+        menu.Items.Add(settingsItem);
+        menu.Items.Add(errorsItem);
+        NativeMenu.SetMenu(this, menu);
+        Styles.Add(new FluentTheme());
+        RequestedThemeVariant = Avalonia.Styling.ThemeVariant.Dark;
+    }
+
+    public override void OnFrameworkInitializationCompleted()
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
+            _controller = new CaptionController(new CaptionSettings(), settings => settings.Provider == SpeechProvider.Google
+                ? new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.GoogleMode)
+                : new AzureCaptionSession(settings.AzureKey, settings.AzureRegion, settings.Locale, settings.Stabilize, settings.AudioDeviceId),
+                action => Dispatcher.UIThread.Post(action));
+            _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>
+                { _settings?.Close(); _errors?.Close(); } };
+            desktop.MainWindow = _captions;
+            InstallSettingsShortcut(_captions);
+        }
+        base.OnFrameworkInitializationCompleted();
+    }
+
+    private void InstallSettingsShortcut(Window window) => window.AddHandler(InputElement.KeyDownEvent, (_, e) =>
+    {
+        if (e.Key != Key.OemComma || e.KeyModifiers != (OperatingSystem.IsMacOS() ? KeyModifiers.Meta : KeyModifiers.Control)) return;
+        e.Handled = true;
+        ShowSettings();
+    }, RoutingStrategies.Tunnel);
+
+    private void ShowSettings()
+    {
+        if (_controller is null || _captions is null) return;
+        if (_settings is null)
+        {
+            _settings = new SettingsWindow(_controller);
+            _settings.Closed += (_, _) => { _settings = null; _captions.Focus(); };
+            InstallSettingsShortcut(_settings);
+            _settings.Show(_captions);
+        }
+        _settings.Activate();
+    }
+    private void ShowErrors()
+    {
+        if (_controller is null || _captions is null) return;
+        if (_errors is null)
+        {
+            _errors = new ErrorLogWindow(_controller.Errors);
+            _errors.Closed += (_, _) => { _errors = null; _captions.Focus(); };
+            InstallSettingsShortcut(_errors);
+            _errors.Show(_captions);
+        }
+        _errors.Activate();
+    }
+}

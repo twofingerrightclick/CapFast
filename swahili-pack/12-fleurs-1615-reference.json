@@ -1,0 +1,23 @@
+{
+  "dataset": "Google FLEURS",
+  "license": "CC-BY-4.0",
+  "credit": "Google FLEURS dataset contributors",
+  "split": "dev",
+  "id": 1615,
+  "sourceLanguage": "sw",
+  "referenceLanguage": "en",
+  "sourceText": "Maelfu ya miaka iliyopita, mwanamume aliyeitwa Aristarchus alisema kwamba Mfumo wa Jua ulizunguka Jua.",
+  "referenceText": "Thousands of years ago, a man called Aristarchus said that the Solar System moved around the Sun.",
+  "audioFilename": "1117230110425064649.wav",
+  "localAudio": "12-fleurs-1615.wav",
+  "audioSHA256": "41a92b2deb286d1cd29f4de11807582fc5e9fbdb3e2b0f3a69a1ab86d0d7bd66",
+  "audioSamples": 149760,
+  "audioSeconds": 9.36,
+  "genderMetadata": "FEMALE",
+  "sources": [
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/sw_ke/dev.tsv",
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/en_us/dev.tsv",
+    "https://storage.googleapis.com/xtreme_translations/FLEURS/sw_ke.tar.gz"
+  ],
+  "verification": "Exact official Swahili filename/sentence ID joined to a unique official English text with the same sentence ID; original WAV data duration verified against metadata."
+}

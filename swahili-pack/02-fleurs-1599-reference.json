@@ -1,0 +1,23 @@
+{
+  "dataset": "Google FLEURS",
+  "license": "CC-BY-4.0",
+  "credit": "Google FLEURS dataset contributors",
+  "split": "dev",
+  "id": 1599,
+  "sourceLanguage": "sw",
+  "referenceLanguage": "en",
+  "sourceText": "Idadi asili haijabadilika kamwe, bado wanahitaji mbinu zile zile za za awali.",
+  "referenceText": "The original population hasn't changed at all, they still need the same adaptations as before.",
+  "audioFilename": "12492429338680010682.wav",
+  "localAudio": "02-fleurs-1599.wav",
+  "audioSHA256": "c9c50edbb8ae2cf5a8b085e8a439454ab04d104f211902055b068cde51ca0222",
+  "audioSamples": 104640,
+  "audioSeconds": 6.54,
+  "genderMetadata": "MALE",
+  "sources": [
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/sw_ke/dev.tsv",
+    "https://huggingface.co/datasets/google/fleurs/resolve/main/data/en_us/dev.tsv",
+    "https://storage.googleapis.com/xtreme_translations/FLEURS/sw_ke.tar.gz"
+  ],
+  "verification": "Exact official Swahili filename/sentence ID joined to a unique official English text with the same sentence ID; original WAV data duration verified against metadata."
+}
