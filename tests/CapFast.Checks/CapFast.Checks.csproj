@@ -10,6 +10,9 @@
     <Compile Include="../../src/CapFast/Core/CaptionLineLayout.cs" Link="CaptionLineLayout.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionPresentation.cs" Link="CaptionPresentation.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionWordReveal.cs" Link="CaptionWordReveal.cs" />
+    <Compile Include="../../src/CapFast/Core/AudioConnectionPolicy.cs" Link="AudioConnectionPolicy.cs" />
+    <Compile Include="../../src/CapFast/Core/SpeechAudioGate.cs" Link="SpeechAudioGate.cs" />
+    <Compile Include="../../src/CapFast/Speech/IAudioActivitySession.cs" Link="IAudioActivitySession.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionSequence.cs" Link="CaptionSequence.cs" />
     <Compile Include="../../src/CapFast/Core/GeminiTranscript.cs" Link="GeminiTranscript.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionSettings.cs" Link="CaptionSettings.cs" />

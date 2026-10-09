@@ -2,8 +2,10 @@ import AVFoundation
 import Foundation
 import CoreAudio
 import AudioToolbox
+import SoundAnalysis
 
-// Stdout is exclusively raw little-endian 16 kHz mono PCM16; stderr has fixed codes.
+// Default stdout is raw PCM16. --activity uses fixed 3201-byte packets:
+// one local class byte (0 unknown/noise, 1 speech, 2 music/singing), then 100 ms PCM.
 func fail(_ code: String) -> Never {
     FileHandle.standardError.write(Data((code + "\n").utf8))
     exit(2)
@@ -72,25 +74,198 @@ if arguments == ["--request-permission"] {
     exit(2)
 }
 var selectedDeviceUID: String?
-if !arguments.isEmpty {
-    guard arguments.count == 2, arguments[0] == "--device", !arguments[1].isEmpty else { fail("MIC_ARGUMENT_ERROR") }
-    selectedDeviceUID = arguments[1]
+var activityMode = false
+var activityFile: String?
+var argumentIndex = 0
+while argumentIndex < arguments.count {
+    switch arguments[argumentIndex] {
+    case "--activity":
+        guard !activityMode else { fail("MIC_ARGUMENT_ERROR") }
+        activityMode = true
+        argumentIndex += 1
+    case "--device", "--activity-file":
+        guard argumentIndex + 1 < arguments.count, !arguments[argumentIndex + 1].isEmpty else { fail("MIC_ARGUMENT_ERROR") }
+        if arguments[argumentIndex] == "--device" {
+            guard selectedDeviceUID == nil else { fail("MIC_ARGUMENT_ERROR") }
+            selectedDeviceUID = arguments[argumentIndex + 1]
+        } else {
+            guard activityFile == nil else { fail("MIC_ARGUMENT_ERROR") }
+            activityFile = arguments[argumentIndex + 1]
+            activityMode = true
+        }
+        argumentIndex += 2
+    default: fail("MIC_ARGUMENT_ERROR")
+    }
 }
+guard activityFile == nil || selectedDeviceUID == nil else { fail("MIC_ARGUMENT_ERROR") }
 
 let engine = AVAudioEngine()
 let output = FileHandle.standardOutput
 let pendingLock = NSLock()
-var pending: [Data] = []
+var pending: [AVAudioPCMBuffer] = []
 let available = DispatchSemaphore(value: 0)
 var captureStarted = false
+
+// Analyze away from the realtime audio tap. Hold each packet until all overlapping
+// classification windows that cover it have completed; a music veto always wins.
+final class ActivityClassifier: NSObject, SNResultsObserving {
+    struct Frame {
+        let start: Int64
+        let data: Data
+        var speech = false
+        var music = false
+        var covered = false
+        let audible: Bool
+    }
+    let analyzer: SNAudioStreamAnalyzer
+    let request: SNClassifySoundRequest
+    let lock = NSLock()
+    let completion = DispatchSemaphore(value: 0)
+    var frames: [Frame] = []
+    var bytes = Data()
+    var position: Int64 = 0
+    var nextFrame: Int64 = 0
+    var lastResultEnd: Int64 = 0
+    let overlapSamples: Int64
+
+    init(format: AVAudioFormat) {
+        do { request = try SNClassifySoundRequest(classifierIdentifier: .version1) }
+        catch { fail("MIC_CLASSIFIER_ERROR") }
+        request.windowDuration = CMTime(seconds: 1, preferredTimescale: 16000)
+        request.overlapFactor = 0.5
+        overlapSamples = Int64((CMTimeGetSeconds(request.windowDuration) * 16000 * 0.5).rounded())
+        analyzer = SNAudioStreamAnalyzer(format: format)
+        super.init()
+        guard ["speech", "music", "singing", "choir_singing"].allSatisfy({ request.knownClassifications.contains($0) }) else { fail("MIC_CLASSIFIER_ERROR") }
+        do { try analyzer.add(request, withObserver: self) }
+        catch { fail("MIC_CLASSIFIER_ERROR") }
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer, pcm: Data) {
+        lock.lock()
+        bytes.append(pcm)
+        while bytes.count >= 3200 {
+            let data = Data(bytes.prefix(3200))
+            // Silence rejection complements the semantic classifier; energy alone
+            // never qualifies a packet as speech. Exact-zero device silence is common.
+            let energy = data.withUnsafeBytes { raw -> Double in
+                var sum = 0.0
+                for offset in stride(from: 0, to: 3200, by: 2) {
+                    let value = Double(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: offset, as: Int16.self))) / 32768
+                    sum += value * value
+                }
+                return sqrt(sum / 1600)
+            }
+            frames.append(Frame(start: nextFrame, data: data, audible: energy >= 0.0005))
+            bytes.removeFirst(3200)
+            nextFrame += 1600
+        }
+        if frames.count > 60 { lock.unlock(); fail("MIC_CLASSIFIER_ERROR") }
+        let start = position
+        position += Int64(buffer.frameLength)
+        lock.unlock()
+        analyzer.analyze(buffer, atAudioFramePosition: start)
+    }
+
+    func request(_ request: SNRequest, didProduce result: SNResult) {
+        guard let result = result as? SNClassificationResult else { fail("MIC_CLASSIFIER_ERROR") }
+        let start = Int64((CMTimeGetSeconds(result.timeRange.start) * 16000).rounded())
+        let end = Int64((CMTimeGetSeconds(CMTimeRangeGetEnd(result.timeRange)) * 16000).rounded())
+        let speech = result.classifications.contains { $0.identifier == "speech" && $0.confidence >= 0.5 }
+        let music = result.classifications.contains {
+            ($0.identifier == "music" || $0.identifier == "singing" || $0.identifier == "choir_singing") && $0.confidence >= 0.5
+        }
+        lock.lock()
+        lastResultEnd = max(lastResultEnd, end)
+        for index in frames.indices where frames[index].start < end && frames[index].start + 1600 > start {
+            frames[index].covered = true
+            frames[index].speech = frames[index].speech || speech
+            frames[index].music = frames[index].music || music
+        }
+        emitThrough(end - overlapSamples)
+        lock.unlock()
+    }
+
+    // Called only under lock, so stream packets cannot interleave.
+    func emitThrough(_ boundary: Int64) {
+        while let frame = frames.first, frame.start + 1600 <= boundary {
+            frames.removeFirst()
+            var packet = Data([frame.music ? 2 : (frame.covered && frame.speech && frame.audible ? 1 : 0)])
+            packet.append(frame.data)
+            do { try output.write(contentsOf: packet) }
+            catch { fail("MIC_PIPE_CLOSED") }
+        }
+    }
+    func finish() {
+        analyzer.completeAnalysis()
+        guard completion.wait(timeout: .now() + 30) == .success else { fail("MIC_CLASSIFIER_ERROR") }
+        lock.lock()
+        emitThrough(position)
+        lock.unlock()
+    }
+    func request(_ request: SNRequest, didFailWithError error: Error) { fail("MIC_CLASSIFIER_ERROR") }
+    func requestDidComplete(_ request: SNRequest) { completion.signal() }
+}
+
+let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+let classifier = activityMode ? ActivityClassifier(format: targetFormat) : nil
+func processBuffer(_ buffer: AVAudioPCMBuffer) {
+    guard let samples = buffer.floatChannelData?[0] else { fail("MIC_CONVERSION_ERROR") }
+    var pcmData = Data(capacity: Int(buffer.frameLength) * 2)
+    for index in 0..<Int(buffer.frameLength) {
+        let sample = samples[index]
+        let value = sample.isFinite ? max(-1, min(1, sample)) : 0
+        var pcm = Int16(value * 32767).littleEndian
+        withUnsafeBytes(of: &pcm) { pcmData.append(contentsOf: $0) }
+    }
+    if let classifier { classifier.append(buffer, pcm: pcmData) }
+    else {
+        do { try output.write(contentsOf: pcmData) }
+        catch { fail("MIC_PIPE_CLOSED") }
+    }
+}
+
+if let path = activityFile {
+    // Offline local classifier check: no engine, microphone permission, or network.
+    do {
+        let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+        if file.processingFormat == targetFormat {
+            while file.framePosition < file.length {
+                let buffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 1600)!
+                try file.read(into: buffer)
+                if buffer.frameLength == 0 { break }
+                processBuffer(buffer)
+            }
+            classifier!.finish()
+            exit(0)
+        }
+        guard let converter = AVAudioConverter(from: file.processingFormat, to: targetFormat) else { fail("MIC_FORMAT_ERROR") }
+        var eof = false
+        while !eof {
+            let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: 1600)!
+            var conversionError: NSError?
+            let status = converter.convert(to: converted, error: &conversionError) { count, state in
+                if eof || file.framePosition >= file.length { eof = true; state.pointee = .endOfStream; return nil }
+                let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: count)!
+                do { try file.read(into: source) } catch { fail("MIC_CONVERSION_ERROR") }
+                if source.frameLength == 0 { eof = true; state.pointee = .endOfStream; return nil }
+                state.pointee = .haveData
+                return source
+            }
+            guard status != .error, conversionError == nil else { fail("MIC_CONVERSION_ERROR") }
+            if converted.frameLength > 0 { processBuffer(converted) }
+        }
+        classifier!.finish()
+        exit(0)
+    } catch { fail("MIC_FORMAT_ERROR") }
+}
 DispatchQueue.global(qos: .userInitiated).async {
     while true {
         available.wait()
         pendingLock.lock()
-        let data = pending.removeFirst()
+        let buffer = pending.removeFirst()
         pendingLock.unlock()
-        do { try output.write(contentsOf: data) }
-        catch { fail("MIC_PIPE_CLOSED") }
+        processBuffer(buffer)
     }
 }
 
@@ -106,7 +281,6 @@ func startCapture() {
     }
     let sourceFormat = input.outputFormat(forBus: 0)
     guard sourceFormat.sampleRate > 0, sourceFormat.channelCount > 0,
-          let targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false),
           let converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
     else { fail("MIC_FORMAT_ERROR") }
 
@@ -121,19 +295,12 @@ func startCapture() {
             state.pointee = .haveData
             return buffer
         }
-        guard status != .error, error == nil, let samples = converted.floatChannelData?[0] else { fail("MIC_CONVERSION_ERROR") }
-        var data = Data(capacity: Int(converted.frameLength) * 2)
-        for index in 0..<Int(converted.frameLength) {
-            let sample = samples[index]
-            let value = sample.isFinite ? max(-1, min(1, sample)) : 0
-            var pcm = Int16(value * 32767).littleEndian
-            withUnsafeBytes(of: &pcm) { data.append(contentsOf: $0) }
-        }
-        if data.isEmpty { return }
+        guard status != .error, error == nil else { fail("MIC_CONVERSION_ERROR") }
+        if converted.frameLength == 0 { return }
         pendingLock.lock()
-        // Fail explicitly rather than accumulating stale audio under network backpressure.
-        if pending.count >= 20 { pendingLock.unlock(); fail("MIC_BACKPRESSURE") }
-        pending.append(data)
+        // Bound all queued capture audio; do not accumulate stale meeting audio.
+        if pending.count >= 100 { pendingLock.unlock(); fail("MIC_BACKPRESSURE") }
+        pending.append(converted)
         pendingLock.unlock()
         available.signal()
     }

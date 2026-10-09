@@ -42,6 +42,11 @@ public sealed class CaptionWindow : Window
     private readonly StackPanel _configuration;
     private readonly TextBlock _status = new() { FontSize = 13, Opacity = .7 };
     private readonly Control _pauseIcon;
+    private readonly Canvas _audioIndicator = new() { Width = 32, Height = 24, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Border _idleDot = new() { Width = 8, Height = 8, CornerRadius = new CornerRadius(4), Background = new SolidColorBrush(Color.Parse("#59B8FF")) };
+    private readonly List<Border> _listeningDots = new();
+    private readonly DispatcherTimer _activityTimer = new() { Interval = TimeSpan.FromMilliseconds(40) };
+    private readonly System.Diagnostics.Stopwatch _activityClock = System.Diagnostics.Stopwatch.StartNew();
     private bool _spaceDown;
     private bool _updatingAudio;
     private bool _listingAudio;
@@ -92,10 +97,21 @@ public sealed class CaptionWindow : Window
                 new Border { Width = 4, Height = 17, Background = Brushes.White, CornerRadius = new CornerRadius(1) }
             } };
         ToolTip.SetTip(_pauseIcon, "Paused — press Space to start");
+        Canvas.SetLeft(_idleDot, 12); Canvas.SetTop(_idleDot, 8); _audioIndicator.Children.Add(_idleDot);
+        for (var index = 0; index < 3; index++)
+        {
+            var dot = new Border { Width = 5, Height = 5, CornerRadius = new CornerRadius(2.5),
+                Background = new SolidColorBrush(Color.Parse("#59B8FF")), IsVisible = false };
+            Canvas.SetLeft(dot, 3 + index * 10); Canvas.SetTop(dot, 9.5);
+            _audioIndicator.Children.Add(dot); _listeningDots.Add(dot);
+        }
+        _activityTimer.Tick += (_, _) => AnimateAudioActivity();
         var footer = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(24, 0, 24, 18) };
         var left = new StackPanel { Spacing = 7, Children = { _status, _pausedControls } };
         footer.Children.Add(left);
-        Grid.SetColumn(_pauseIcon, 1); footer.Children.Add(_pauseIcon);
+        var corner = new Grid { Width = 32, Height = 24, VerticalAlignment = VerticalAlignment.Center,
+            Children = { _pauseIcon, _audioIndicator } };
+        Grid.SetColumn(corner, 1); footer.Children.Add(corner);
         var shell = new Grid { RowDefinitions = new RowDefinitions("*,Auto") };
         _stage = new Grid { Children = { _band, _configuration } };
         _stage.SizeChanged += (_, _) => FitCaption();
@@ -112,7 +128,7 @@ public sealed class CaptionWindow : Window
         _controller.CanAcceptCaptions = () => _presentation.CanAcceptCaptions;
         Closed += (_, _) => { _controller.Changed -= Refresh; _controller.CaptionReceived -= ReceiveCaption;
             _controller.CaptionsCleared -= ClearCaption; _controller.CanAcceptCaptions = null;
-            _scrollTimer.Stop(); _presentation.Clear(); _wordReveal.Clear(); _wordBrushes.Clear(); };
+            _scrollTimer.Stop(); _activityTimer.Stop(); _presentation.Clear(); _wordReveal.Clear(); _wordBrushes.Clear(); };
         Closing += async (_, e) =>
         {
             if (_allowClose) return;
@@ -146,6 +162,14 @@ public sealed class CaptionWindow : Window
         var paused = _controller.IsPaused;
         _pausedControls.IsVisible = paused;
         _pauseIcon.IsVisible = paused;
+        _audioIndicator.IsVisible = !paused && _controller.HasAudioActivity;
+        var listening = _audioIndicator.IsVisible && _controller.AudioActivity == AudioActivity.Speech;
+        _idleDot.IsVisible = !listening;
+        foreach (var dot in _listeningDots) dot.IsVisible = listening;
+        ToolTip.SetTip(_audioIndicator, listening ? "Speech detected — qualifying or transcribing" : "Listening — no qualifying speech; music and singing are skipped");
+        Avalonia.Automation.AutomationProperties.SetName(_audioIndicator, listening ? "Speech detected" : "Listening for speech");
+        if (listening) { AnimateAudioActivity(); _activityTimer.Start(); }
+        else _activityTimer.Stop();
         _status.Text = paused ? $"{_controller.Status}  ·  {(OperatingSystem.IsMacOS() ? "⌘, settings" : "Ctrl+, settings")}" : _controller.State == CaptionState.Live ? "" : _controller.Status;
         _status.IsVisible = !string.IsNullOrEmpty(_status.Text);
         var missing = _controller.MissingConfiguration;
@@ -156,6 +180,16 @@ public sealed class CaptionWindow : Window
         if (paused && !_wasPaused && IsVisible) _ = RefreshAudioAsync();
         _wasPaused = paused;
         if (!paused) Focus();
+    }
+
+    private void AnimateAudioActivity()
+    {
+        for (var index = 0; index < _listeningDots.Count; index++)
+        {
+            var pulse = (1 + Math.Sin(_activityClock.Elapsed.TotalSeconds * 2 * Math.PI / 1.2 - index * .85)) / 2;
+            _listeningDots[index].Opacity = .3 + .7 * pulse;
+            Canvas.SetTop(_listeningDots[index], 9.5 - 2 * pulse);
+        }
     }
 
     private async Task RefreshAudioAsync()

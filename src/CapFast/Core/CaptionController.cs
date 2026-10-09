@@ -23,6 +23,8 @@ public sealed class CaptionController
     public CaptionSettings Settings { get; }
     public CaptionState State { get; private set; } = CaptionState.Paused;
     public bool IsPaused => State == CaptionState.Paused;
+    public AudioActivity AudioActivity { get; private set; } = AudioActivity.Idle;
+    public bool HasAudioActivity { get; private set; }
     public string Text => _buffer.Text;
     public string? CaptionUtteranceId { get; private set; }
     public string Status { get; private set; } = "Paused — press Space to start";
@@ -92,6 +94,14 @@ public sealed class CaptionController
             {
                 var session = _factory(Settings.Copy());
                 _session = session;
+                AudioActivity = AudioActivity.Idle;
+                HasAudioActivity = session is IAudioActivitySession;
+                if (session is IAudioActivitySession audioActivity)
+                    audioActivity.AudioActivityChanged += activity => _dispatch(() =>
+                    {
+                        if (generation != _generation || !_wantLive || AudioActivity == activity) return;
+                        AudioActivity = activity; Changed?.Invoke();
+                    });
                 session.Caption += update => _dispatch(() =>
                 {
                     if (generation == _generation && _wantLive) ApplyCaption(update);
@@ -130,6 +140,7 @@ public sealed class CaptionController
     private async Task StopAsync()
     {
         ++_generation;
+        AudioActivity = AudioActivity.Idle; HasAudioActivity = false;
         _demo?.Cancel(); _demo?.Dispose(); _demo = null;
         var session = _session; _session = null;
         if (session != null)

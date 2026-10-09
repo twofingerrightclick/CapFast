@@ -1,5 +1,11 @@
 using CapFast.Core;
 
+if (args.Length == 2 && args[0] == "--speech-gate-fixtures")
+{
+    SpeechAudioGateChecks.RunFixtures(args[1]);
+    return;
+}
+
 static void Equal(string expected, string actual)
 {
     if (actual != expected) throw new Exception($"Expected '{expected}', got '{actual}'");
@@ -49,6 +55,8 @@ if (System.Globalization.StringInfo.ParseCombiningCharacters(emojiTail).Length !
 GeminiChecks.Run();
 CaptionLayoutChecks.Run();
 CaptionWordRevealChecks.Run();
+SpeechAudioGateChecks.Run();
+AudioConnectionPolicyChecks.Run();
 await TwoStageChecks.RunAsync();
 await ControllerChecks.RunAsync();
 ConfigurationChecks.Run();

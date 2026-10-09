@@ -68,6 +68,8 @@ internal static class ControllerChecks
         reading.CaptionReceived += received.Add;
         reading.CaptionsCleared += () => cleared++;
         await reading.ToggleAsync();
+        readingSession.EmitActivity(AudioActivity.Speech);
+        Require(reading.HasAudioActivity && reading.AudioActivity == AudioActivity.Speech, "Speech activity did not reach the controller");
         var longPhrase = string.Join(" ", Enumerable.Range(1, 100).Select(i => $"word{i:000}"));
         readingSession.Emit(new CaptionUpdate("long-one", longPhrase, true));
         Require(received.Count == 1 && received[0].Text == longPhrase, "Display event lost the opening of a long translation");
@@ -79,6 +81,8 @@ internal static class ControllerChecks
         Require(reading.IsPaused && readingSession.Disposed && reading.Errors.Entries.Single().Message.Contains("reading fell behind"),
             "Display backlog did not pause capture with a visible diagnostic");
         readingSession.Emit(new CaptionUpdate("late", "Stale after pause", true));
+        readingSession.EmitActivity(AudioActivity.Speech);
+        Require(!reading.HasAudioActivity && reading.AudioActivity == AudioActivity.Idle, "Stale activity survived pause");
         Require(received.Count == 2, "Paused session delivered stale raw captions");
         reading.ClearCaptions();
         Require(cleared == 1 && reading.Text == "", "Clear did not notify queued presentation");
@@ -102,11 +106,13 @@ internal static class ControllerChecks
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.Delay(Timeout.Infinite, cancellationToken);
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
-    private sealed class FakeSession : ICaptionSession
+    private sealed class FakeSession : ICaptionSession, IAudioActivitySession
     {
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public bool Disposed { get; private set; }
         public event Action<CaptionUpdate>? Caption;
+        public event Action<AudioActivity>? AudioActivityChanged;
+        public void EmitActivity(AudioActivity activity) => AudioActivityChanged?.Invoke(activity);
         public event Action<string>? Status { add { } remove { } }
         public event Action<string>? Ended { add { } remove { } }
         public Task StartAsync(CancellationToken cancellationToken = default) => Started.Task;
