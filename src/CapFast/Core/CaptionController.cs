@@ -15,6 +15,8 @@ public sealed class CaptionController
     private CancellationTokenSource? _starting;
     private CancellationTokenSource? _demo;
     private readonly TimeProvider _timeProvider;
+    private ITimer? _inactivityTimer;
+    private int _inactivityEpoch;
     private ITimer? _musicTimer;
     private int _musicEpoch;
     private bool _musicExpired;
@@ -41,12 +43,13 @@ public sealed class CaptionController
     public event Action? Changed;
     public event Action<CaptionUpdate>? CaptionReceived;
     public event Action? CaptionsCleared;
+    public event Action? CaptionsFading;
     public event Action? LocalConfigurationLoaded;
     public Func<bool>? CanAcceptCaptions { get; set; }
     public void SettingsChanged() => Changed?.Invoke();
     public void NotifyLocalConfigurationLoaded() { LocalConfigurationLoaded?.Invoke(); Changed?.Invoke(); }
     public void ClearCaptions()
-    { _buffer.Clear(); CaptionUtteranceId = null; CaptionsCleared?.Invoke(); Changed?.Invoke(); }
+    { CancelInactivityCountdown(); _buffer.Clear(); CaptionUtteranceId = null; CaptionsCleared?.Invoke(); Changed?.Invoke(); }
     public Task PauseForDisplayBacklogAsync() => _shutdown ? Task.CompletedTask : PauseWithErrorAsync(DisplayBacklogMessage);
 
     private bool DisplayReady()
@@ -55,6 +58,32 @@ public sealed class CaptionController
         _wantLive = false; State = CaptionState.Paused; Status = DisplayBacklogMessage;
         Errors.Add(DisplayBacklogMessage); Changed?.Invoke();
         return false;
+    }
+
+    private void CancelInactivityCountdown()
+    {
+        ++_inactivityEpoch;
+        _inactivityTimer?.Dispose(); _inactivityTimer = null;
+    }
+
+    private void RestartInactivityCountdown()
+    {
+        CancelInactivityCountdown();
+        var epoch = _inactivityEpoch;
+        var generation = _generation;
+        _inactivityTimer = _timeProvider.CreateTimer(_ => _dispatch(() =>
+        {
+            if (generation != _generation || epoch != _inactivityEpoch || !_wantLive) return;
+            FadeCaptions();
+        }), null, TimeSpan.FromSeconds(15), Timeout.InfiniteTimeSpan);
+    }
+
+    private void FadeCaptions()
+    {
+        CancelInactivityCountdown();
+        if (string.IsNullOrEmpty(_buffer.Text)) return;
+        _buffer.Clear(); CaptionUtteranceId = null;
+        CaptionsFading?.Invoke(); Changed?.Invoke();
     }
 
     private void CancelMusicCountdown()
@@ -76,8 +105,8 @@ public sealed class CaptionController
                 if (generation != _generation || epoch != _musicEpoch || !_wantLive || AudioActivity != AudioActivity.Music) return;
                 _musicExpired = true;
                 _musicTimer?.Dispose(); _musicTimer = null;
-                ClearCaptions();
-            }), null, TimeSpan.FromSeconds(10), Timeout.InfiniteTimeSpan);
+                FadeCaptions();
+            }), null, TimeSpan.FromSeconds(7), Timeout.InfiniteTimeSpan);
         }
         Changed?.Invoke();
     }
@@ -92,6 +121,7 @@ public sealed class CaptionController
         update = update with { Text = EnglishCaptionFilter.Default.Filter(update.Text) };
         _buffer.Apply(update);
         if (_buffer.LastAcceptedUpdate is not { } accepted) return;
+        if (!string.IsNullOrWhiteSpace(accepted.Text)) RestartInactivityCountdown();
         CaptionUtteranceId = accepted.UtteranceId;
         CaptionReceived?.Invoke(accepted);
         Changed?.Invoke();
@@ -100,12 +130,12 @@ public sealed class CaptionController
     {
         if (_shutdown) return Task.CompletedTask;
         _wantLive = !_wantLive;
-        if (!_wantLive) { CancelMusicCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel(); State = CaptionState.Pausing; Changed?.Invoke(); }
+        if (!_wantLive) { CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel(); State = CaptionState.Pausing; Changed?.Invoke(); }
         return ReconcileAsync();
     }
     public Task PauseAsync()
     {
-        _wantLive = false; CancelMusicCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel();
+        _wantLive = false; CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel();
         if (!IsPaused) { State = CaptionState.Pausing; Changed?.Invoke(); }
         return ReconcileAsync();
     }
@@ -153,7 +183,9 @@ public sealed class CaptionController
                 { if (generation == _generation && _wantLive) { _ = PauseWithErrorAsync(message); } });
                 await session.StartAsync(starting.Token);
                 if (!_wantLive || generation != _generation) { await StopAsync(); return; }
-                State = CaptionState.Live; Status = "Live — press Space to pause"; Changed?.Invoke();
+                State = CaptionState.Live; Status = "Live — press Space to pause";
+                if (!string.IsNullOrEmpty(Text)) RestartInactivityCountdown();
+                Changed?.Invoke();
             }
             catch (OperationCanceledException) when (starting.IsCancellationRequested)
             {
@@ -181,7 +213,7 @@ public sealed class CaptionController
     private async Task StopAsync()
     {
         ++_generation;
-        CancelMusicCountdown();
+        CancelMusicCountdown(); CancelInactivityCountdown();
         AudioActivity = AudioActivity.Idle; HasAudioActivity = false;
         _demo?.Cancel(); _demo?.Dispose(); _demo = null;
         var session = _session; _session = null;

@@ -25,6 +25,8 @@ public sealed class CaptionWindow : Window
     private readonly List<TextBlock> _rowLabels = new();
     private readonly CaptionWordReveal _wordReveal = new();
     private readonly List<(CaptionWordReveal.Word Word, SolidColorBrush Brush)> _wordBrushes = new();
+    private readonly DispatcherTimer _fadeTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
+    private readonly System.Diagnostics.Stopwatch _fadeClock = new();
     private readonly DispatcherTimer _scrollTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private readonly System.Diagnostics.Stopwatch _scrollClock = new();
     private string[] _visibleLines = Array.Empty<string>();
@@ -66,6 +68,12 @@ public sealed class CaptionWindow : Window
         Background = Brushes.Black;
         Width = 1280; Height = 720; MinWidth = 640; MinHeight = 360;
         _band = new Border { Child = _captionCanvas, VerticalAlignment = VerticalAlignment.Top, ClipToBounds = true };
+        _fadeTimer.Tick += (_, _) =>
+        {
+            var progress = Math.Clamp(_fadeClock.Elapsed.TotalMilliseconds / 800, 0, 1);
+            _captionCanvas.Opacity = 1 - progress * progress * (3 - 2 * progress);
+            if (progress >= 1) ClearCaption();
+        };
         _scrollTimer.Tick += (_, _) => AnimateScroll();
         var settings = new Button { Content = "Settings…" };
         settings.Click += (_, _) => OpenSettings?.Invoke();
@@ -127,8 +135,10 @@ public sealed class CaptionWindow : Window
         _controller.Changed += Refresh;
         _controller.CaptionReceived += ReceiveCaption;
         _controller.CaptionsCleared += ClearCaption;
+        _controller.CaptionsFading += FadeCaption;
         _controller.CanAcceptCaptions = () => _presentation.CanAcceptCaptions;
         Closed += (_, _) => { _controller.Changed -= Refresh; _controller.CaptionReceived -= ReceiveCaption;
+            _controller.CaptionsFading -= FadeCaption; _fadeTimer.Stop();
             _controller.CaptionsCleared -= ClearCaption; _controller.CanAcceptCaptions = null;
             _scrollTimer.Stop(); _activityTimer.Stop(); _presentation.Clear(); _wordReveal.Clear(); _wordBrushes.Clear(); };
         Closing += async (_, e) =>
@@ -170,7 +180,7 @@ public sealed class CaptionWindow : Window
         _musicIcon.IsVisible = music;
         _idleDot.IsVisible = !listening && !music;
         foreach (var dot in _listeningDots) dot.IsVisible = listening;
-        ToolTip.SetTip(_audioIndicator, music ? "Music detected — captions clear after ten seconds" : listening ? "Speech detected — qualifying or transcribing" : "Listening — no qualifying speech; music and singing are skipped");
+        ToolTip.SetTip(_audioIndicator, music ? "Music detected — captions fade after seven seconds" : listening ? "Speech detected — qualifying or transcribing" : "Listening — captions fade after fifteen seconds without translatable speech; music and singing are skipped");
         Avalonia.Automation.AutomationProperties.SetName(_audioIndicator, music ? "Music detected" : listening ? "Speech detected" : "Listening for speech");
         if (listening) { AnimateAudioActivity(); _activityTimer.Start(); }
         else _activityTimer.Stop();
@@ -221,6 +231,11 @@ public sealed class CaptionWindow : Window
 
     private void ReceiveCaption(CaptionUpdate update)
     {
+        if (_fadeClock.IsRunning)
+        {
+            if (string.IsNullOrWhiteSpace(update.Text)) return;
+            ClearCaption();
+        }
         try
         {
             if (!_presentation.Submit(update)) _ = _controller.PauseForDisplayBacklogAsync();
@@ -229,8 +244,15 @@ public sealed class CaptionWindow : Window
         FitCaption();
     }
 
+    private void FadeCaption()
+    {
+        _scrollTimer.Stop();
+        _fadeClock.Restart(); _fadeTimer.Start();
+    }
+
     private void ClearCaption()
     {
+        _fadeTimer.Stop(); _fadeClock.Reset(); _captionCanvas.Opacity = 1;
         _presentation.Clear(); _scrollTarget = null; _waitingForReveal = false; _scrollTimer.Stop(); _wordReveal.Clear();
         _presentationGeneration = _presentation.Generation;
         ShowRows(Array.Empty<string>());
@@ -264,6 +286,7 @@ public sealed class CaptionWindow : Window
 
     private void StartNextFrame()
     {
+        if (_fadeClock.IsRunning) return;
         if (_scrollTarget is not null) return;
         var now = _presentationClock.Elapsed.TotalSeconds;
         if (_waitingForReveal)
