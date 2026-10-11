@@ -55,7 +55,7 @@ public sealed class App : Application
             _controller.Changed += ApplyAppearance;
             _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>
                 { _settings?.Close(); _errors?.Close(); } };
-            _captions.Opened += async (_, _) => await LoadLocalConfigurationAsync();
+            _captions.Opened += async (_, _) => { ShowSettings(); await LoadLocalConfigurationAsync(); };
             desktop.MainWindow = _captions;
             InstallSettingsShortcut(_captions);
         }
@@ -120,7 +120,7 @@ public sealed class App : Application
         if (_controller is null || _captions is null) return;
         if (_settings is null)
         {
-            _settings = new SettingsWindow(_controller);
+            _settings = new SettingsWindow(_controller) { ToggleDisplayFullscreen = _captions.ToggleFullscreen };
             _settings.Closed += (_, _) => { _settings = null; _captions.Focus(); };
             InstallSettingsShortcut(_settings);
             _settings.Show(_captions);

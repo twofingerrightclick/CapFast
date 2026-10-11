@@ -55,6 +55,9 @@ public static class TwoStageChecks
             "Translation request diverged from the tested Flash configuration.");
         using var response = JsonDocument.Parse("""{"candidates":[{"finishReason":"STOP","content":{"parts":[{"thought":true,"text":"private reasoning"},{"text":"English output"}]}}]}""");
         Check(FlashTextTranslator.ParseResponse(response.RootElement) == "English output", "Reasoning leaked into captions.");
+        using var technical = JsonDocument.Parse("""{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"JSON parsing error: {\"unexpected\": true}"}]}}]}""");
+        try { FlashTextTranslator.ParseResponse(technical.RootElement); throw new Exception("Technical model output was accepted as a translation."); }
+        catch (CaptionSessionException) { }
         using var truncated = JsonDocument.Parse("""{"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[{"text":"partial"}]}}]}""");
         try { FlashTextTranslator.ParseResponse(truncated.RootElement); throw new Exception("Truncated translation was accepted."); }
         catch (CaptionSessionException) { }

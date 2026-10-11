@@ -6,7 +6,7 @@ Related planned work is tracked in [features.md](features.md).
 
 ## CAP-001 — JSON or parsing error text appears in captions
 
-**Status:** Open  
+**Status:** Mitigated in FEAT-003; live provider validation pending.
 **Observed:** JSON and parsing error text has appeared on the caption surface.  
 **Impact:** Audience-facing captions can show technical text instead of speech translation.
 
@@ -36,7 +36,7 @@ A temporary read-only probe against the production parser, filter, and translati
 
 ## CAP-003 — A pause or gap can be hard to diagnose from the caption window
 
-**Status:** Open  
+**Status:** Operator diagnostic visibility improved in FEAT-002/003; further live gap classification pending.
 **Observed:** Captions can appear to pause for no apparent reason.  
 **Impact:** The operator may not know whether capture stopped, is reconnecting, is waiting for translation, or is still live but has no accepted speech.
 

@@ -61,6 +61,24 @@ internal static class ControllerChecks
         var unsafeFailure = new CaptionController(settings, _ => throw new Exception("secret-value"), a => a());
         await unsafeFailure.ToggleAsync();
         Require(!unsafeFailure.Status.Contains("secret-value") && !unsafeFailure.Errors.Entries.Single().Message.Contains("secret-value"), "Raw exception leaked");
+        var technicalSession = new FakeSession();
+        technicalSession.Started.SetResult();
+        var technicalController = new CaptionController(settings, _ => technicalSession, a => a());
+        await technicalController.ToggleAsync();
+        technicalSession.Emit(new CaptionUpdate("technical", "JSON parsing ", false));
+        Require(technicalController.Text == "", "Partial diagnostic prefix reached direct audience captions");
+        technicalSession.Emit(new CaptionUpdate("technical", "JSON parsing error: {\"unexpected\": true}", true));
+        Require(technicalController.Text == "" && technicalController.Errors.Entries.Last().Message.Contains("withheld"),
+            "Technical text reached direct audience captions or was not diagnosed");
+        technicalSession.Emit(new CaptionUpdate("bracketed", "[The speaker resumes] Welcome.", true));
+        Require(technicalController.Text.Contains("[The speaker resumes] Welcome."), "Legitimate bracketed caption was rejected");
+        technicalController.ClearCaptions();
+        technicalSession.Emit(new CaptionUpdate("revised", "Ordinary draft", false));
+        technicalSession.Emit(new CaptionUpdate("revised", "Error: {\"secret\": true}", true));
+        Require(technicalController.Text == "", "Revised technical utterance left its earlier partial on screen");
+        technicalSession.Emit(new CaptionUpdate("speech", "Welcome everyone.", true));
+        Require(technicalController.Text == "Welcome everyone.", "A rejected provider result blocked later speech");
+        await technicalController.ShutdownAsync();
         var readingSession = new FakeSession();
         readingSession.Started.SetResult();
         var reading = new CaptionController(settings, _ => readingSession, a => a());

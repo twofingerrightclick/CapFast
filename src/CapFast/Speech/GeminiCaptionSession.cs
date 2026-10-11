@@ -375,6 +375,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
                 connection.Transport.Abort();
             }
         }
+        catch (System.Text.Json.JsonException) { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail("Gemini returned malformed session JSON. Capture paused; check service availability and start again."); }
         catch (CaptionSessionException safe) { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail(safe.Message); }
         catch { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail("Gemini returned an invalid response. Capture paused; check service availability and start again."); }
         finally { connection.Setup.TrySetException(_failure ?? new CaptionSessionException("Gemini setup did not complete. Check the selected Google Live model and retry.")); }

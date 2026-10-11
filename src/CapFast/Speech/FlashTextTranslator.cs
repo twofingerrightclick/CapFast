@@ -59,6 +59,7 @@ public sealed class FlashTextTranslator : IDisposable
             return translation;
         }
         catch (CaptionSessionException) { throw; }
+        catch (JsonException) { throw new CaptionSessionException("Google returned malformed translation JSON. Capture paused; try again when the service recovers."); }
         catch (TransientServiceException error) { throw new CaptionSessionException($"Google text translation failed after bounded retries (HTTP {error.Status}). Restart when the service recovers."); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException) { throw new CaptionSessionException("Google text translation timed out. Restart when the connection recovers."); }
@@ -115,6 +116,8 @@ public sealed class FlashTextTranslator : IDisposable
             !(part.TryGetProperty("thought", out var thought) && thought.ValueKind == JsonValueKind.True))
             .Select(part => part.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String ? text.GetString() : "")).Trim();
         if (result.Length == 0 || result.Length > 16384) throw new CaptionSessionException($"Google returned an empty or oversized {targetLanguage} translation.");
+        if (CapFast.Core.CaptionContentSafety.IsTechnicalOutput(result))
+            throw new CaptionSessionException($"Google returned technical text instead of a {targetLanguage} translation. The response was withheld from captions.");
         return result;
     }
 

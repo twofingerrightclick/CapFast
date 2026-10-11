@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Templates;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
 using CapFast.Core;
 using CapFast.Speech;
 
@@ -34,12 +36,25 @@ public sealed class SettingsWindow : Window
     private readonly StackPanel _azurePanel;
     private readonly Button _demo = new() { Content = "Preview sample captions" };
     private readonly Button _pause = new() { Content = "Start captions" };
+    private readonly Button _clear = new() { Content = "Clear captions" };
+    private readonly Button _fullscreen = new() { Content = "Toggle display fullscreen" };
+    private readonly ComboBox _audio = new() { MinWidth = 250 };
+    private readonly Button _refreshAudio = new() { Content = "Refresh inputs" };
+    private readonly TextBlock _audioAvailability = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+    private readonly TextBlock _activity = new() { FontSize = 25, FontWeight = FontWeight.Bold, Width = 40,
+        Foreground = new SolidColorBrush(Color.Parse("#59B8FF")) };
+    private readonly TextBlock _sessionStatus = new() { TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
 
     private readonly Button _openFile = new() { Content = "Open API key file" };
     private readonly Button _reloadFile = new() { Content = "Reload file" };
     private readonly Button _microphone = new() { Content = "Check microphone permission" };
     private readonly TextBlock _diagnostic = new() { TextWrapping = TextWrapping.Wrap, FontSize = 13 };
+    private readonly TextBlock _latestIssue = new() { TextWrapping = TextWrapping.Wrap, FontWeight = FontWeight.Medium };
+    private readonly StackPanel _diagnosticHistory = new() { Spacing = 7 };
     private bool _checkingMicrophone;
+    private bool _updatingAudio;
+    private bool _listingAudio;
+    private bool _audioAvailable = true;
     private bool _loading;
     private bool _closed;
     private bool _reloadingFile;
@@ -49,12 +64,13 @@ public sealed class SettingsWindow : Window
     private Task? _prepareFile;
     private string? _preparePath;
     private CancellationTokenSource? _microphoneCheck;
+    public Action? ToggleDisplayFullscreen { get; set; }
 
     public SettingsWindow(CaptionController controller)
     {
         _controller = controller;
         Title = "CapFast — Settings";
-        Width = 520; Height = 680; MinWidth = 420; MinHeight = 420;
+        Width = 600; Height = 760; MinWidth = 440; MinHeight = 480;
         _lightMode.IsChecked = controller.Settings.Appearance == AppAppearance.Light;
         _provider.SelectedIndex = controller.Settings.Provider == SpeechProvider.Google ? 0 : 1;
         _gemini.Text = controller.Settings.GeminiKey;
@@ -80,8 +96,8 @@ public sealed class SettingsWindow : Window
             _googlePanel, _azurePanel } };
         var close = new Button { Content = "Done", HorizontalAlignment = HorizontalAlignment.Right };
         close.Click += (_, _) => Close();
-        var clear = new Button { Content = "Clear captions" };
-        clear.Click += (_, _) => controller.ClearCaptions();
+        _clear.Click += (_, _) => controller.ClearCaptions();
+        _fullscreen.Click += (_, _) => ToggleDisplayFullscreen?.Invoke();
         _demo.Click += async (_, _) => { await controller.RunDemoAsync(); };
         _pause.Click += async (_, _) =>
         {
@@ -91,22 +107,55 @@ public sealed class SettingsWindow : Window
         _openFile.Click += async (_, _) => await OpenConfigurationFileAsync();
         _reloadFile.Click += async (_, _) => await ReloadConfigurationAsync();
         _microphone.Click += async (_, _) => await CheckMicrophoneAsync();
+        _audio.ItemTemplate = new FuncDataTemplate<AudioInput>((input, _) => new TextBlock { Text = input?.Name });
+        _audio.ItemsSource = new[] { new AudioInput("", "System default") };
+        _audio.SelectedIndex = 0;
+        _audio.SelectionChanged += (_, _) =>
+        {
+            if (_updatingAudio || !_controller.IsPaused || _audio.SelectedItem is not AudioInput input) return;
+            _controller.Settings.AudioDeviceId = input.Id;
+            _controller.SettingsChanged();
+            _audioAvailable = !input.Name.Contains("unavailable", StringComparison.OrdinalIgnoreCase);
+            UpdateAudioAvailability();
+        };
+        _refreshAudio.Click += async (_, _) => await RefreshAudioAsync();
+        var commands = new StackPanel { Spacing = 10, Children =
+        {
+            Label("Commands"),
+            new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), Children =
+            {
+                _activity,
+                PlaceInColumn(_sessionStatus, 1)
+            } },
+            _pause, _demo, _clear, _fullscreen, _microphone
+        } };
+        var clearHistory = new Button { Content = "Clear diagnostic history", HorizontalAlignment = HorizontalAlignment.Right };
+        clearHistory.Click += (_, _) => { _controller.Errors.Clear(); _controller.Events.Clear(); };
+        var diagnostics = new StackPanel { Spacing = 8, Children =
+        {
+            Label("Diagnostics"),
+            _latestIssue,
+            _diagnostic,
+            new ScrollViewer { Height = 155, Content = _diagnosticHistory },
+            clearHistory
+        } };
         Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(28), Spacing = 18,
             Children = { new TextBlock { Text = "Settings", FontSize = 28, FontWeight = FontWeight.SemiBold },
-                Label("Transcription"), _pause,
+                commands, diagnostics,
+                new Separator(), Label("Audio input"),
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _audio, _refreshAudio } },
+                _audioAvailability,
                 Label("Appearance"), _lightMode,
                 _notice, _configuration,
                 new TextBlock { Text = "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 _configurationPath,
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } },
-                _microphone, _diagnostic,
                 new Separator(), Label("Caption size"), _size,
                 _readingLabel, _readingSpeed,
                 new TextBlock { Text = "Text fills the window. This pace controls how soon older text can leave; a slower pace may delay captions behind the speaker.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _demo, clear } },
-                new TextBlock { Text = "Start or pause here, or press Space in the caption window. F11 toggles fullscreen; Esc exits fullscreen.",
+                new TextBlock { Text = "Commands stay here while the audience window displays captions. F11 toggles display fullscreen; Esc exits fullscreen.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 }, close } } };
         _lightMode.IsCheckedChanged += (_, _) =>
         {
@@ -138,14 +187,20 @@ public sealed class SettingsWindow : Window
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
         controller.Changed += Refresh;
         controller.LocalConfigurationLoaded += RefreshLocalConfiguration;
+        controller.Errors.Changed += RefreshDiagnostics;
+        controller.Events.Changed += RefreshDiagnostics;
+        Opened += async (_, _) => await RefreshAudioAsync();
         Closed += (_, _) =>
         {
             _closed = true;
             controller.Changed -= Refresh;
             controller.LocalConfigurationLoaded -= RefreshLocalConfiguration;
+            controller.Errors.Changed -= RefreshDiagnostics;
+            controller.Events.Changed -= RefreshDiagnostics;
             _microphoneCheck?.Cancel();
         };
         _diagnostic.Text = controller.Settings.ConfigurationError ?? "";
+        RefreshDiagnostics();
         Refresh();
     }
 
@@ -233,7 +288,11 @@ public sealed class SettingsWindow : Window
         }
         catch (TimeoutException)
         {
-            if (!_closed) _diagnostic.Text = "The API file is still waiting for access. Check macOS file permissions or enter a key above, then try Reload again.";
+            if (!_closed)
+            {
+                _diagnostic.Text = "The API file is still waiting for access. Check macOS file permissions or enter a key above, then try Reload again.";
+                _controller.Errors.Add("Reading the local API file timed out. Check file permissions and try Reload again.");
+            }
         }
         catch
         {
@@ -255,7 +314,7 @@ public sealed class SettingsWindow : Window
         {
             await GeminiCaptionSession.RequestMicrophonePermissionAsync(cancellation.Token);
             if (_closed) return;
-            _diagnostic.Text = "Microphone permission granted. Return to captions and press Space to start.";
+            _diagnostic.Text = "Microphone permission granted. Use Start captions above when ready.";
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
         catch (Exception error)
@@ -275,6 +334,69 @@ public sealed class SettingsWindow : Window
     }
 
     private static TextBlock Label(string text) => new() { Text = text, FontWeight = FontWeight.Medium };
+    private void RefreshDiagnostics()
+    {
+        if (_closed) return;
+        if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(RefreshDiagnostics); return; }
+        var issues = _controller.Errors.Entries;
+        _latestIssue.Text = issues.Count == 0 ? "Latest issue: none" : $"Latest issue: {issues[^1].Message}";
+        var entries = issues.Select(entry => (entry.Time, entry.Message, Kind: "Issue"))
+            .Concat(_controller.Events.Entries.Select(entry => (entry.Time, entry.Message, Kind: "Event")))
+            .OrderByDescending(entry => entry.Time).Take(100).ToArray();
+        _diagnosticHistory.Children.Clear();
+        if (entries.Length == 0) _diagnosticHistory.Children.Add(new TextBlock { Text = "No events recorded yet.", Opacity = .65 });
+        foreach (var entry in entries)
+            _diagnosticHistory.Children.Add(new TextBlock
+            {
+                Text = $"{entry.Time.ToLocalTime():HH:mm:ss}  {entry.Kind} · {entry.Message}",
+                TextWrapping = TextWrapping.Wrap, FontSize = 12
+            });
+    }
+    private async Task RefreshAudioAsync()
+    {
+        if (_listingAudio) return;
+        _listingAudio = true;
+        _refreshAudio.IsEnabled = false;
+        try
+        {
+            var inputs = (await MacAudioInputs.ListAsync()).ToList();
+            if (_closed) return;
+            _updatingAudio = true;
+            var selected = inputs.FirstOrDefault(input => input.Id == _controller.Settings.AudioDeviceId);
+            _audioAvailable = selected is not null;
+            if (selected is null)
+            {
+                selected = new AudioInput(_controller.Settings.AudioDeviceId, "Selected input unavailable — choose another");
+                inputs.Add(selected);
+            }
+            _audio.ItemsSource = inputs;
+            _audio.SelectedItem = selected;
+            UpdateAudioAvailability();
+        }
+        catch
+        {
+            if (_closed) return;
+            _audioAvailable = false;
+            _audioAvailability.Text = "Input availability could not be checked. Refresh inputs or check microphone permission.";
+            _controller.Errors.Add("Could not list audio inputs. Check microphone permission and the audio helper.");
+        }
+        finally
+        {
+            _updatingAudio = false;
+            _listingAudio = false;
+            if (!_closed) { _refreshAudio.IsEnabled = true; Refresh(); }
+        }
+    }
+
+    private void UpdateAudioAvailability()
+    {
+        var selected = _audio.SelectedItem as AudioInput;
+        _audioAvailability.Text = _audioAvailable
+            ? $"Selected: {selected?.Name ?? "System default"} · Available"
+            : "Selected input unavailable. Pause captions and choose another input.";
+    }
+    private static T PlaceInColumn<T>(T control, int column) where T : Control
+    { Grid.SetColumn(control, column); return control; }
     private void Save()
     {
         if (_loading || !_controller.IsPaused) return;
@@ -298,11 +420,19 @@ public sealed class SettingsWindow : Window
     }
     private void Refresh()
     {
+        if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(Refresh); return; }
         _configuration.IsEnabled = _controller.IsPaused;
         _pause.Content = _controller.IsPaused ? "Start captions"
             : _controller.State == CaptionState.Pausing ? "Pausing…" : "Pause captions";
         _pause.IsEnabled = _controller.State != CaptionState.Pausing;
         _demo.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
+        _audio.IsEnabled = _controller.IsPaused && !_listingAudio;
+        _activity.Text = _controller.AudioActivity == AudioActivity.Music && _controller.State == CaptionState.Live ? "♫"
+            : _controller.State == CaptionState.Live ? "•••" : "·";
+        Avalonia.Automation.AutomationProperties.SetName(_activity,
+            _controller.AudioActivity == AudioActivity.Music && _controller.State == CaptionState.Live ? "Music detected"
+            : _controller.State == CaptionState.Live ? "Transcription running" : "Transcription paused");
+        _sessionStatus.Text = _controller.Status;
         _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile;
         _microphone.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _microphone.IsVisible = OperatingSystem.IsMacOS();
@@ -312,7 +442,7 @@ public sealed class SettingsWindow : Window
         _googleDescription.Text = _french.IsChecked == true
             ? "Swahili speech is transcribed once and translated into English and French. English appears on the left and French on the right. This uses Google TwoStage and adds a Flash translation request for each fragment. Changing the caption languages clears existing captions."
             : "Two-stage mode translates stable Swahili fragments into English.";
-        _notice.Text = _controller.IsPaused ? "Configure the service, then start captions here or in the caption window."
+        _notice.Text = _controller.IsPaused ? "Configure the service, then use Start captions above."
             : "Transcription is running. Pause to change the service or credentials.";
     }
 }

@@ -10,6 +10,7 @@
     <Compile Include="../../src/CapFast/Core/EnglishCaptionFilter.cs" Link="EnglishCaptionFilter.cs" />
     <EmbeddedResource Include="../../src/CapFast/Core/EnglishCaptionBlacklist.txt" LogicalName="CapFast.EnglishCaptionBlacklist.txt" />
     <Compile Include="../../src/CapFast/Core/CaptionBuffer.cs" Link="CaptionBuffer.cs" />
+    <Compile Include="../../src/CapFast/Core/CaptionContentSafety.cs" Link="CaptionContentSafety.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionLineLayout.cs" Link="CaptionLineLayout.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionPresentation.cs" Link="CaptionPresentation.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionWordReveal.cs" Link="CaptionWordReveal.cs" />

@@ -6,7 +6,7 @@ namespace CapFast.Core;
 // Serializing transitions prevents an old start/stop from owning a newer session.
 public sealed class CaptionController
 {
-    private const string DisplayBacklogMessage = "Caption reading fell behind the speaker. Transcription paused to preserve queued text; let the captions finish, then press Space to restart.";
+    private const string DisplayBacklogMessage = "Caption reading fell behind the speaker. Transcription paused to preserve queued text; let the captions finish, then use Start captions in Settings.";
     private readonly Func<CaptionSettings, ICaptionSession> _factory;
     private readonly Action<Action> _dispatch;
     private readonly CaptionBuffer _buffer = new();
@@ -35,8 +35,9 @@ public sealed class CaptionController
     public bool HasAudioActivity { get; private set; }
     public string Text => _buffer.Text;
     public string? CaptionUtteranceId { get; private set; }
-    public string Status { get; private set; } = "Paused — press Space to start";
+    public string Status { get; private set; } = "Paused — use Start captions in Settings";
     public ErrorLog Errors { get; } = new();
+    public ErrorLog Events { get; } = new();
     public string? MissingConfiguration => Settings.IsLoadingConfiguration
         ? "Loading your local API configuration… You can open Settings while it loads."
         : Settings.Provider == SpeechProvider.Google
@@ -127,6 +128,13 @@ public sealed class CaptionController
         // Late results from already accepted speech must not refill the screen
         // after the music timeout. New non-music activity restores delivery.
         if (_musicExpired && AudioActivity == AudioActivity.Music) return;
+        if (CaptionContentSafety.IsTechnicalOutput(update.Text) || CaptionContentSafety.IsTechnicalOutput(update.FrenchText))
+        {
+            Errors.Add("A provider returned technical text instead of a caption. The text was withheld from the audience.");
+            if (CaptionUtteranceId == update.UtteranceId) ClearCaptions();
+            return;
+        }
+        if (!update.IsFinal && (CaptionContentSafety.HoldPartial(update.Text) || CaptionContentSafety.HoldPartial(update.FrenchText))) return;
         // Filter every provider and every interim revision before either the
         // history preview or animated presentation can receive caption text.
         update = update with { Text = EnglishCaptionFilter.Default.Filter(update.Text) };
@@ -163,7 +171,8 @@ public sealed class CaptionController
             if (!DisplayReady()) return;
             if (MissingConfiguration is { } missing)
             { _wantLive = false; State = CaptionState.Paused; Status = missing; Changed?.Invoke(); return; }
-            State = CaptionState.Starting; Status = "Connecting…"; Changed?.Invoke();
+            State = CaptionState.Starting; Status = "Connecting…";
+            Events.Add("Connecting to the caption service."); Changed?.Invoke();
             var generation = ++_generation;
             using var starting = new CancellationTokenSource();
             _starting = starting;
@@ -190,12 +199,23 @@ public sealed class CaptionController
                     if (generation == _generation && _wantLive) ApplyCaption(update);
                 });
                 session.Status += message => _dispatch(() =>
-                { if (generation == _generation && _wantLive) { Status = message; Changed?.Invoke(); } });
+                {
+                    if (generation != _generation || !_wantLive) return;
+                    Status = message;
+                    if (message == "Google connection interrupted — reconnecting…")
+                        Events.Add("Caption service connection is recovering.");
+                    else if (message == "Listening locally — Google reconnects when speech resumes.")
+                        Events.Add("Google connection closed while idle; listening locally for speech.");
+                    else if (message is "Google live — translating qualified speech." or "Gemini connected — starting the selected Mac audio input.")
+                        Events.Add("Caption service connected.");
+                    Changed?.Invoke();
+                });
                 session.Ended += message => _dispatch(() =>
                 { if (generation == _generation && _wantLive) { _ = PauseWithErrorAsync(message); } });
                 await session.StartAsync(starting.Token);
                 if (!_wantLive || generation != _generation) { await StopAsync(); return; }
-                State = CaptionState.Live; Status = "Live — press Space to pause";
+                State = CaptionState.Live; Status = "Live — use Pause captions in Settings";
+                Events.Add("Caption session is live.");
                 if (_hasCaptionText) RestartInactivityCountdown();
                 Changed?.Invoke();
             }
@@ -206,7 +226,7 @@ public sealed class CaptionController
             catch (Exception error)
             {
                 var message = error is CaptionSessionException ? error.Message
-                    : "Could not start transcription. Open Errors for details; check the configured service and connection.";
+                    : "Could not start transcription. Check Settings diagnostics, service configuration, and connection.";
                 // A session-ended callback may already have recorded its precise error.
                 if (_wantLive) Errors.Add(message);
                 _wantLive = false; await StopAsync();
@@ -235,7 +255,7 @@ public sealed class CaptionController
             try { await session.DisposeAsync(); }
             catch { Errors.Add("Could not cleanly stop transcription."); }
         }
-        State = CaptionState.Paused; Status = "Paused — press Space to start"; Changed?.Invoke();
+        State = CaptionState.Paused; Status = "Paused — use Start captions in Settings"; Changed?.Invoke();
     }
     public async Task RunDemoAsync()
     {
@@ -250,7 +270,7 @@ public sealed class CaptionController
             if (!DisplayReady()) return;
             _demo = new CancellationTokenSource(); token = _demo.Token;
             generation = ++_generation;
-            _wantLive = true; State = CaptionState.Live; Status = "Caption demo — press Space to pause"; Changed?.Invoke();
+            _wantLive = true; State = CaptionState.Live; Status = "Caption demo — use Pause captions in Settings"; Changed?.Invoke();
         }
         finally { _transition.Release(); }
         try

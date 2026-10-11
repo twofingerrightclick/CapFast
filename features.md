@@ -4,11 +4,15 @@ Working backlog for CapFast. Items describe desired behavior, not completed work
 
 ## FEAT-002 — Put command buttons first in Settings - seetings becomes a command center as well.
 
+**Status:** Implemented; live operator validation pending.
+
 Make the caption control buttons a top-level group at the top of Settings, easy to reach during a live session. Keep configuration controls below the commands. Build a robust command center. It should have options for everyting, and have a top level status indicatcors (the ... indicator that transctiption is running, . when none, music indactor). Overall the display window is just for display, and controls move to the settings window.
 
 Select and change the audio input in Settings. Remove the input selector and related input controls from the audience caption display. The chosen device and its availability should remain visible to the operator in Settings.
 
 ## FEAT-003 — Show errors and issues below the Settings commands
+
+**Status:** Implemented; live provider validation pending.
 
 Place a visible diagnostic output area immediately below the command button group in Settings. Log JSON parse failures, service errors, connection and recovery events, and other issues there. Keep technical text out of audience captions. Preserve useful error history and make the latest issue clear without opening a separate window. Do not show credentials or raw sensitive provider responses.
 
