@@ -10,6 +10,7 @@ public sealed class SourceTranslationPipeline : IAsyncDisposable
     private readonly Channel<QueuedSource> _queue;
     private readonly TimeSpan _coalesceWindow;
     private readonly Func<string, CancellationToken, Task<string>> _translate;
+    private readonly Func<string, CancellationToken, Task<string>>? _translateFrench;
     private readonly CancellationTokenSource _lifetime;
     private readonly object _gate = new();
     private readonly HashSet<string> _accepted = new();
@@ -23,9 +24,11 @@ public sealed class SourceTranslationPipeline : IAsyncDisposable
     public Task Completion { get; }
 
     public SourceTranslationPipeline(Func<string, CancellationToken, Task<string>> translate,
-        CancellationToken cancellationToken = default, int capacity = 8, TimeSpan? coalesceWindow = null)
+        CancellationToken cancellationToken = default, int capacity = 8, TimeSpan? coalesceWindow = null,
+        Func<string, CancellationToken, Task<string>>? translateFrench = null)
     {
         _translate = translate;
+        _translateFrench = translateFrench;
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _coalesceWindow = coalesceWindow ?? TimeSpan.FromSeconds(3);
         if (_coalesceWindow < TimeSpan.Zero || _coalesceWindow > TimeSpan.FromSeconds(3))
@@ -95,11 +98,18 @@ public sealed class SourceTranslationPipeline : IAsyncDisposable
                 }
                 _lifetime.Token.ThrowIfCancellationRequested();
                 BatchStarted?.Invoke(sources.AsReadOnly());
-                var translated = await _translate(text, _lifetime.Token).WaitAsync(_lifetime.Token);
+                var english = _translate(text, _lifetime.Token);
+                var french = _translateFrench?.Invoke(text, _lifetime.Token);
+                // Each language translates the same original source with its own
+                // context. Publish only complete pairs, in source order.
+                if (french is not null)
+                    await Task.WhenAll(english, french).WaitAsync(_lifetime.Token);
+                else
+                    await english.WaitAsync(_lifetime.Token);
                 lock (_gate)
                 {
                     if (_disposed || _lifetime.IsCancellationRequested) return;
-                    Caption?.Invoke(new(first.Update.UtteranceId, translated, true));
+                    Caption?.Invoke(new(first.Update.UtteranceId, english.Result, true, french?.Result));
                 }
             }
         }

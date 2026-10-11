@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/CapFast/Core/AppearancePreferences.cs" Link="AppearancePreferences.cs" />
     <Compile Include="../../src/CapFast/Core/EnglishCaptionFilter.cs" Link="EnglishCaptionFilter.cs" />
     <EmbeddedResource Include="../../src/CapFast/Core/EnglishCaptionBlacklist.txt" LogicalName="CapFast.EnglishCaptionBlacklist.txt" />
     <Compile Include="../../src/CapFast/Core/CaptionBuffer.cs" Link="CaptionBuffer.cs" />

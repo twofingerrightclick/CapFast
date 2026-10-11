@@ -12,11 +12,15 @@ namespace CapFast.Views;
 public sealed class SettingsWindow : Window
 {
     private readonly CaptionController _controller;
+    private readonly CheckBox _lightMode = new() { Content = "Light mode" };
     private readonly StackPanel _configuration;
     private readonly ComboBox _provider = new() { ItemsSource = new[] { "Google Gemini", "Azure Speech" } };
     private readonly TextBox _gemini = new() { PasswordChar = '●' };
     private readonly ComboBox _googleMode = new() { ItemsSource = new[]
         { "Swahili transcription → English translation", "Live Translate (comparison)" } };
+    private readonly CheckBox _french = new() { Content = "Add French captions" };
+    private readonly CheckBox _rejectMusic = new() { Content = "Reject detected music and singing" };
+    private readonly TextBlock _googleDescription = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 };
     private readonly TextBox _azure = new() { PasswordChar = '●' };
     private readonly TextBox _region = new();
     private readonly ComboBox _locale = new() { ItemsSource = new[] { "sw-KE", "sw-TZ" } };
@@ -29,7 +33,7 @@ public sealed class SettingsWindow : Window
     private readonly StackPanel _googlePanel;
     private readonly StackPanel _azurePanel;
     private readonly Button _demo = new() { Content = "Preview sample captions" };
-    private readonly Button _pause = new() { Content = "Pause transcription to edit settings" };
+    private readonly Button _pause = new() { Content = "Start captions" };
 
     private readonly Button _openFile = new() { Content = "Open API key file" };
     private readonly Button _reloadFile = new() { Content = "Reload file" };
@@ -51,9 +55,12 @@ public sealed class SettingsWindow : Window
         _controller = controller;
         Title = "CapFast — Settings";
         Width = 520; Height = 680; MinWidth = 420; MinHeight = 420;
+        _lightMode.IsChecked = controller.Settings.Appearance == AppAppearance.Light;
         _provider.SelectedIndex = controller.Settings.Provider == SpeechProvider.Google ? 0 : 1;
         _gemini.Text = controller.Settings.GeminiKey;
         _googleMode.SelectedIndex = controller.Settings.GoogleMode == GoogleCaptionMode.TwoStage ? 0 : 1;
+        _french.IsChecked = controller.Settings.FrenchEnabled;
+        _rejectMusic.IsChecked = controller.Settings.RejectMusic;
         _azure.Text = controller.Settings.AzureKey;
         _region.Text = controller.Settings.AzureRegion;
         _locale.SelectedItem = controller.Settings.Locale;
@@ -63,8 +70,10 @@ public sealed class SettingsWindow : Window
         _readingSpeed.Value = controller.Settings.ReadingWordsPerMinute;
         _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
         _googlePanel = new StackPanel { Spacing = 8, Children = { Label("Google caption mode"), _googleMode,
-            new TextBlock { Text = "Two-stage mode translates stable Swahili fragments into English. Live transcription sessions last up to 10 minutes; restart when the session ends.",
-                TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 }, Label("Gemini API key"), _gemini } };
+            _french, _googleDescription, _rejectMusic,
+            new TextBlock { Text = "Off by default. Music-labeled audio can be captioned; pause manually when music plays. Change this while paused.",
+                TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
+            Label("Gemini API key"), _gemini } };
         _azurePanel = new StackPanel { Spacing = 8, Children = { Label("Azure Speech key"), _azure,
             Label("Azure region"), _region, Label("Swahili locale"), _locale, _stabilize } };
         _configuration = new StackPanel { Spacing = 14, Children = { Label("Translation service"), _provider,
@@ -74,13 +83,19 @@ public sealed class SettingsWindow : Window
         var clear = new Button { Content = "Clear captions" };
         clear.Click += (_, _) => controller.ClearCaptions();
         _demo.Click += async (_, _) => { await controller.RunDemoAsync(); };
-        _pause.Click += async (_, _) => await controller.PauseAsync();
+        _pause.Click += async (_, _) =>
+        {
+            if (controller.IsPaused) await controller.ToggleAsync();
+            else await controller.PauseAsync();
+        };
         _openFile.Click += async (_, _) => await OpenConfigurationFileAsync();
         _reloadFile.Click += async (_, _) => await ReloadConfigurationAsync();
         _microphone.Click += async (_, _) => await CheckMicrophoneAsync();
         Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(28), Spacing = 18,
             Children = { new TextBlock { Text = "Settings", FontSize = 28, FontWeight = FontWeight.SemiBold },
-                _notice, _pause, _configuration,
+                Label("Transcription"), _pause,
+                Label("Appearance"), _lightMode,
+                _notice, _configuration,
                 new TextBlock { Text = "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 _configurationPath,
@@ -91,10 +106,17 @@ public sealed class SettingsWindow : Window
                 new TextBlock { Text = "Text fills the window. This pace controls how soon older text can leave; a slower pace may delay captions behind the speaker.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _demo, clear } },
-                new TextBlock { Text = "Press Space in the caption window to start or pause. F11 toggles fullscreen; Esc exits fullscreen.",
+                new TextBlock { Text = "Start or pause here, or press Space in the caption window. F11 toggles fullscreen; Esc exits fullscreen.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 }, close } } };
+        _lightMode.IsCheckedChanged += (_, _) =>
+        {
+            controller.Settings.Appearance = _lightMode.IsChecked == true ? AppAppearance.Light : AppAppearance.Dark;
+            controller.SettingsChanged();
+        };
         _provider.SelectionChanged += (_, _) => Save();
         _googleMode.SelectionChanged += (_, _) => Save();
+        _french.IsCheckedChanged += (_, _) => Save();
+        _rejectMusic.IsCheckedChanged += (_, _) => Save();
         _gemini.TextChanged += (_, _) => Save();
         _azure.TextChanged += (_, _) => Save();
         _region.TextChanged += (_, _) => Save();
@@ -257,8 +279,16 @@ public sealed class SettingsWindow : Window
     {
         if (_loading || !_controller.IsPaused) return;
         var settings = _controller.Settings;
+        if (_french.IsChecked == true && _googleMode.SelectedIndex != 0)
+        {
+            _loading = true;
+            _googleMode.SelectedIndex = 0;
+            _loading = false;
+        }
         settings.Provider = _provider.SelectedIndex == 0 ? SpeechProvider.Google : SpeechProvider.Azure;
         settings.GoogleMode = _googleMode.SelectedIndex == 0 ? GoogleCaptionMode.TwoStage : GoogleCaptionMode.LiveTranslate;
+        settings.FrenchEnabled = _french.IsChecked == true;
+        settings.RejectMusic = _rejectMusic.IsChecked == true;
         settings.GeminiKey = _gemini.Text ?? "";
         settings.AzureKey = _azure.Text ?? "";
         settings.AzureRegion = _region.Text ?? "";
@@ -269,14 +299,20 @@ public sealed class SettingsWindow : Window
     private void Refresh()
     {
         _configuration.IsEnabled = _controller.IsPaused;
-        _pause.IsVisible = !_controller.IsPaused;
+        _pause.Content = _controller.IsPaused ? "Start captions"
+            : _controller.State == CaptionState.Pausing ? "Pausing…" : "Pause captions";
+        _pause.IsEnabled = _controller.State != CaptionState.Pausing;
         _demo.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile;
         _microphone.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _microphone.IsVisible = OperatingSystem.IsMacOS();
         _googlePanel.IsVisible = _provider.SelectedIndex == 0;
         _azurePanel.IsVisible = !_googlePanel.IsVisible;
-        _notice.Text = _controller.IsPaused ? "Configure the service, then return to the caption window and press Space."
+        _googleMode.IsEnabled = _french.IsChecked != true;
+        _googleDescription.Text = _french.IsChecked == true
+            ? "Swahili speech is transcribed once and translated into English and French. English appears on the left and French on the right. This uses Google TwoStage and adds a Flash translation request for each fragment. Changing the caption languages clears existing captions."
+            : "Two-stage mode translates stable Swahili fragments into English.";
+        _notice.Text = _controller.IsPaused ? "Configure the service, then start captions here or in the caption window."
             : "Transcription is running. Pause to change the service or credentials.";
     }
 }

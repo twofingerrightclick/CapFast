@@ -60,6 +60,7 @@ SpeechAudioGateChecks.Run();
 AudioConnectionPolicyChecks.Run();
 await LiveRecoveryChecks.RunAsync();
 await TwoStageChecks.RunAsync();
+await FrenchChecks.RunAsync();
 await TranslationRecoveryChecks.RunAsync();
 await ControllerChecks.RunAsync();
 ConfigurationChecks.Run();

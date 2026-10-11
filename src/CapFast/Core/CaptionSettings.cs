@@ -29,7 +29,12 @@ public sealed class CaptionSettings
         IsLoadingConfiguration = false;
     }
     public SpeechProvider Provider { get; set; } = SpeechProvider.Google;
+    public AppAppearance Appearance { get; set; } = AppAppearance.Dark;
     public GoogleCaptionMode GoogleMode { get; set; } = GoogleCaptionMode.TwoStage;
+    public bool RejectMusic { get; set; }
+    public bool FrenchEnabled { get; set; }
+    public bool ShowFrench => Provider == SpeechProvider.Google && FrenchEnabled;
+    public GoogleCaptionMode EffectiveGoogleMode => ShowFrench ? GoogleCaptionMode.TwoStage : GoogleMode;
     public string GeminiKey { get; set; } = "";
     public string AzureKey { get; set; } = "";
     public string AzureRegion { get; set; } = "";

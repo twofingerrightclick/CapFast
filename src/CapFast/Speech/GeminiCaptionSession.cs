@@ -40,6 +40,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     private Connection? _connection;
     private readonly GoogleCaptionMode _mode;
     private readonly FlashTextTranslator? _translator;
+    private readonly FlashTextTranslator? _frenchTranslator;
     private readonly SourceTranslationPipeline? _pipeline;
     private Process? _microphone;
     private Task? _sendAudio;
@@ -49,6 +50,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     private int _disposed;
     private int _ended;
     private readonly string? _audioDeviceId;
+    private readonly bool _rejectMusic;
     private CaptionSessionException? _failure;
 
     public event Action<string>? Diagnostic;
@@ -57,22 +59,26 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     public event Action<string>? Status;
     public event Action<string>? Ended;
 
-    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null, GoogleCaptionMode mode = GoogleCaptionMode.TwoStage)
-        : this(apiKey, audioDeviceId, mode, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock()) { }
+    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null, GoogleCaptionMode mode = GoogleCaptionMode.TwoStage,
+        bool frenchEnabled = false, bool rejectMusic = false)
+        : this(apiKey, audioDeviceId, mode, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock(), frenchEnabled, rejectMusic) { }
 
     internal GeminiCaptionSession(string apiKey, string? audioDeviceId, GoogleCaptionMode mode,
-        Func<ILiveTransport> transportFactory, ILiveClock clock)
+        Func<ILiveTransport> transportFactory, ILiveClock clock, bool frenchEnabled = false, bool rejectMusic = false)
     {
         if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("A Gemini API key is required.");
         // Same header authentication used by Google's native Live SDK; no key in URLs/logs.
         _transportFactory = transportFactory;
         _clock = clock;
         _audioDeviceId = audioDeviceId;
-        _mode = mode;
-        if (mode == GoogleCaptionMode.TwoStage)
+        _rejectMusic = rejectMusic;
+        _mode = frenchEnabled ? GoogleCaptionMode.TwoStage : mode;
+        if (_mode == GoogleCaptionMode.TwoStage)
         {
             _translator = new FlashTextTranslator(apiKey);
-            _pipeline = new SourceTranslationPipeline(_translator.TranslateAsync, _lifetime.Token, coalesceWindow: TimeSpan.Zero);
+            if (frenchEnabled) _frenchTranslator = new FlashTextTranslator(apiKey, targetLanguage: "French");
+            _pipeline = new SourceTranslationPipeline(_translator.TranslateAsync, _lifetime.Token, coalesceWindow: TimeSpan.Zero,
+                translateFrench: _frenchTranslator is null ? null : _frenchTranslator.TranslateAsync);
             _pipeline.Caption += update => { if (!_lifetime.IsCancellationRequested) Caption?.Invoke(update); };
             _pipeline.Failed += Fail;
         }
@@ -353,7 +359,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
                     if (_pipeline is not null)
                     {
                         if (!_pipeline.TryAcceptTranscript(update, Now))
-                            throw new CaptionSessionException("English translation fell behind the audio. Captions paused to avoid a growing delay; restart the session.");
+                            throw new CaptionSessionException("Translation fell behind the audio. Captions paused to avoid a growing delay; restart the session.");
                     }
                     else Caption?.Invoke(update);
                 }
@@ -429,7 +435,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
 
     private async Task PumpAudioAsync(ChannelReader<ClassifiedAudioFrame> frames)
     {
-        var gate = new SpeechAudioGate();
+        var gate = new SpeechAudioGate(_rejectMusic);
         var activity = AudioActivity.Idle;
         var recovering = false;
         AudioActivityChanged?.Invoke(activity);
@@ -563,6 +569,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         _microphone?.Dispose();
         _connection?.Dispose();
         _translator?.Dispose();
+        _frenchTranslator?.Dispose();
         // Canceled workers can still finish after the timeout; dispose CTS when all finish.
         _ = completion.ContinueWith(_ => _lifetime.Dispose(), CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);

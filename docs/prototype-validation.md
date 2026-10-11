@@ -1,5 +1,19 @@
 # Prototype build and review
 
+## English and French captions — October 11, 2026
+
+The local annotated `v1` tag points to commit `482c0bc`, the committed baseline before French support. Preexisting uncommitted appearance changes were preserved; Git tags do not include uncommitted files.
+
+Google still defaults to TwoStage: `gemini-3.5-transcribe-live`, verbatim `sw-KE`, then `gemini-3.8-flash` English translation. While paused, **Add French captions** enables a second Flash translator using the same original Swahili fragment and independent source context. English/French pairs publish together in source order; French forces TwoStage. Each display column uses the same word reveal, reading pace, scrolling, resize replay, and fade behavior. Changing caption languages clears visible and queued captions.
+
+Separate agents reviewed the translation and UI slices; the UI reviewer also reviewed final packaging. No blocking findings remained. The review's top-alignment suggestion was applied to the extracted caption canvas.
+
+- Debug build and complete executable checks passed. New checks cover the French prompt and Swahili context, ordered pairs, cancellation while French is pending, incomplete-pair failure, English filtering with preserved French text, French-only inactivity, and clearing on language changes.
+- Apple Silicon Release bundle published; strict signature verification and plist validation passed. NuGet reported NU1900 because its vulnerability metadata endpoint was unreachable; cached packages allowed the build and publish to complete.
+- Packaged runtime sample preview visibly confirmed English left, French right, scrolling after demo capture paused, fullscreen reflow, and return to the original window size. Disabling French cleared both surfaces and restored a single English column. The app was left empty, paused, and with French disabled.
+
+This slice used local sample captions and fake service responses; it made no paid cloud requests and does not establish French translation accuracy or real microphone-to-caption latency. French adds a Flash request per fragment and pairs wait for the slower translation. The English blacklist remains English-only. Dynamic speech/target-language selection remains future work.
+
 Validated October 7, 2026 on macOS 15.7, Apple Silicon, with .NET SDK 10.0.101.
 
 ## Reviewed slices

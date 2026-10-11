@@ -1,13 +1,12 @@
 using Avalonia;
-using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Controls.Templates;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Controls.Documents;
 using Avalonia.Threading;
+using Avalonia.Styling;
 using CapFast.Core;
 using CapFast.Speech;
 
@@ -16,27 +15,14 @@ namespace CapFast.Views;
 public sealed class CaptionWindow : Window
 {
     private readonly CaptionController _controller;
-    private readonly TextBlock _text = new() { Foreground = Brushes.White, FontSize = 48,
-        FontWeight = FontWeight.Medium, TextWrapping = TextWrapping.NoWrap, MaxLines = 3,
-        TextAlignment = TextAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
-    private readonly CaptionPresentation _presentation = new();
-    private readonly Canvas _captionCanvas = new() { ClipToBounds = true };
-    private readonly System.Diagnostics.Stopwatch _presentationClock = System.Diagnostics.Stopwatch.StartNew();
-    private readonly List<TextBlock> _rowLabels = new();
-    private readonly CaptionWordReveal _wordReveal = new();
-    private readonly List<(CaptionWordReveal.Word Word, SolidColorBrush Brush)> _wordBrushes = new();
-    private readonly DispatcherTimer _fadeTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
-    private readonly System.Diagnostics.Stopwatch _fadeClock = new();
-    private readonly DispatcherTimer _scrollTimer = new() { Interval = TimeSpan.FromMilliseconds(16) };
-    private readonly System.Diagnostics.Stopwatch _scrollClock = new();
-    private string[] _visibleLines = Array.Empty<string>();
-    private string[]? _scrollTarget;
-    private string _geometry = "";
-    private int _scrollRows;
-    private int _presentationGeneration;
-    private bool _waitingForReveal;
+    private readonly CaptionSurface _englishCaptions = new();
+    private readonly CaptionSurface _frenchCaptions = new() { IsVisible = false };
+    private readonly TextBlock _englishLabel = new() { Text = "English", FontSize = 14, Opacity = .65, Margin = new Thickness(24, 10, 24, 0), IsVisible = false };
+    private readonly TextBlock _frenchLabel = new() { Text = "Français", FontSize = 14, Opacity = .65, Margin = new Thickness(24, 10, 24, 0) };
+    private readonly Border _divider = new() { Background = Brushes.Gray, Opacity = .25, IsVisible = false };
+    private readonly Grid _columns;
+    private readonly Grid _frenchColumn;
     private readonly Grid _stage;
-    private readonly Border _band;
     private readonly StackPanel _pausedControls;
     private readonly ComboBox _audio = new() { Width = 280, PlaceholderText = "Audio input" };
     private readonly TextBlock _message = new() { TextWrapping = TextWrapping.Wrap,
@@ -67,14 +53,6 @@ public sealed class CaptionWindow : Window
         Focusable = true;
         Background = Brushes.Black;
         Width = 1280; Height = 720; MinWidth = 640; MinHeight = 360;
-        _band = new Border { Child = _captionCanvas, VerticalAlignment = VerticalAlignment.Top, ClipToBounds = true };
-        _fadeTimer.Tick += (_, _) =>
-        {
-            var progress = Math.Clamp(_fadeClock.Elapsed.TotalMilliseconds / 800, 0, 1);
-            _captionCanvas.Opacity = 1 - progress * progress * (3 - 2 * progress);
-            if (progress >= 1) ClearCaption();
-        };
-        _scrollTimer.Tick += (_, _) => AnimateScroll();
         var settings = new Button { Content = "Settings…" };
         settings.Click += (_, _) => OpenSettings?.Invoke();
         var openSettings = new Button { Content = "Open settings", HorizontalAlignment = HorizontalAlignment.Center };
@@ -123,10 +101,21 @@ public sealed class CaptionWindow : Window
             Children = { _pauseIcon, _audioIndicator } };
         Grid.SetColumn(corner, 1); footer.Children.Add(corner);
         var shell = new Grid { RowDefinitions = new RowDefinitions("*,Auto") };
-        _stage = new Grid { Children = { _band, _configuration } };
+        var englishColumn = new Grid { RowDefinitions = new RowDefinitions("Auto,*"),
+            Children = { _englishLabel, _englishCaptions } };
+        Grid.SetRow(_englishCaptions, 1);
+        _frenchColumn = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), IsVisible = false,
+            Children = { _frenchLabel, _frenchCaptions } };
+        Grid.SetRow(_frenchCaptions, 1);
+        _columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,0,0"),
+            Children = { englishColumn, _divider, _frenchColumn } };
+        Grid.SetColumn(_divider, 1); Grid.SetColumn(_frenchColumn, 2);
+        _stage = new Grid { Children = { _columns, _configuration } };
         _stage.SizeChanged += (_, _) => FitCaption();
         shell.Children.Add(_stage); Grid.SetRow(footer, 1); shell.Children.Add(footer);
         Content = shell;
+        ActualThemeVariantChanged += (_, _) => ApplyTheme();
+        ApplyTheme();
         SizeChanged += (_, _) => FitCaption();
         AddHandler(KeyDownEvent, HandleKeyDown, RoutingStrategies.Tunnel);
         AddHandler(KeyUpEvent, (_, e) => { if (e.Key == Key.Space) _spaceDown = false; }, RoutingStrategies.Tunnel);
@@ -136,11 +125,11 @@ public sealed class CaptionWindow : Window
         _controller.CaptionReceived += ReceiveCaption;
         _controller.CaptionsCleared += ClearCaption;
         _controller.CaptionsFading += FadeCaption;
-        _controller.CanAcceptCaptions = () => _presentation.CanAcceptCaptions;
+        _controller.CanAcceptCaptions = () => _englishCaptions.CanAcceptCaptions && (!_controller.Settings.ShowFrench || _frenchCaptions.CanAcceptCaptions);
         Closed += (_, _) => { _controller.Changed -= Refresh; _controller.CaptionReceived -= ReceiveCaption;
-            _controller.CaptionsFading -= FadeCaption; _fadeTimer.Stop();
+            _controller.CaptionsFading -= FadeCaption;
             _controller.CaptionsCleared -= ClearCaption; _controller.CanAcceptCaptions = null;
-            _scrollTimer.Stop(); _activityTimer.Stop(); _presentation.Clear(); _wordReveal.Clear(); _wordBrushes.Clear(); };
+            _activityTimer.Stop(); _englishCaptions.Stop(); _frenchCaptions.Stop(); };
         Closing += async (_, e) =>
         {
             if (_allowClose) return;
@@ -153,6 +142,23 @@ public sealed class CaptionWindow : Window
             Close();
         };
         Refresh();
+    }
+
+    private void ApplyTheme()
+    {
+        var light = ActualThemeVariant == ThemeVariant.Light;
+        Background = light ? Brushes.White : Brushes.Black;
+        var captionColor = light ? Color.Parse("#171717") : Colors.White;
+        var foreground = new SolidColorBrush(captionColor);
+        Foreground = foreground;
+        _englishLabel.Foreground = _frenchLabel.Foreground = foreground;
+        _englishCaptions.SetCaptionColor(captionColor);
+        _frenchCaptions.SetCaptionColor(captionColor);
+        foreach (var bar in ((StackPanel)_pauseIcon).Children.OfType<Border>()) bar.Background = foreground;
+        var activity = new SolidColorBrush(Color.Parse(light ? "#0067B8" : "#59B8FF"));
+        _idleDot.Background = activity;
+        _musicIcon.Foreground = activity;
+        foreach (var dot in _listeningDots) dot.Background = activity;
     }
 
     private async void HandleKeyDown(object? sender, KeyEventArgs e)
@@ -189,7 +195,10 @@ public sealed class CaptionWindow : Window
         var missing = _controller.MissingConfiguration;
         _configuration.IsVisible = paused && missing is not null;
         _message.Text = missing;
-        _text.FontSize = _controller.Settings.FontSize;
+        var bilingual = _controller.Settings.ShowFrench;
+        _columns.ColumnDefinitions[1].Width = new GridLength(bilingual ? 1 : 0);
+        _columns.ColumnDefinitions[2].Width = bilingual ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+        _englishLabel.IsVisible = _frenchColumn.IsVisible = _frenchCaptions.IsVisible = _divider.IsVisible = bilingual;
         FitCaption();
         if (paused && !_wasPaused && IsVisible) _ = RefreshAudioAsync();
         _wasPaused = paused;
@@ -231,137 +240,33 @@ public sealed class CaptionWindow : Window
 
     private void ReceiveCaption(CaptionUpdate update)
     {
-        if (_fadeClock.IsRunning)
-        {
-            if (string.IsNullOrWhiteSpace(update.Text)) return;
-            ClearCaption();
-        }
         try
         {
-            if (!_presentation.Submit(update)) _ = _controller.PauseForDisplayBacklogAsync();
+            var ready = _englishCaptions.Submit(update);
+            if (_controller.Settings.ShowFrench)
+                ready = _frenchCaptions.Submit(update with { Text = update.FrenchText ?? "", FrenchText = null }) && ready;
+            if (!ready) _ = _controller.PauseForDisplayBacklogAsync();
         }
         catch (InvalidOperationException) { _ = _controller.PauseForDisplayBacklogAsync(); }
-        FitCaption();
     }
 
     private void FadeCaption()
     {
-        _scrollTimer.Stop();
-        _fadeClock.Restart(); _fadeTimer.Start();
+        _englishCaptions.FadeCaption();
+        _frenchCaptions.FadeCaption();
     }
 
     private void ClearCaption()
     {
-        _fadeTimer.Stop(); _fadeClock.Reset(); _captionCanvas.Opacity = 1;
-        _presentation.Clear(); _scrollTarget = null; _waitingForReveal = false; _scrollTimer.Stop(); _wordReveal.Clear();
-        _presentationGeneration = _presentation.Generation;
-        ShowRows(Array.Empty<string>());
+        _englishCaptions.ClearCaption();
+        _frenchCaptions.ClearCaption();
     }
 
     private void FitCaption()
     {
-        var width = Bounds.Width > 0 ? Bounds.Width : Width;
-        var side = Math.Clamp(width * .05, 24, 80);
-        _band.Padding = new Thickness(side, 22, side, 22);
-        _text.LineHeight = _text.FontSize * 1.25;
-        var stageHeight = _stage.Bounds.Height > 0 ? _stage.Bounds.Height : Height - 80;
-        var rows = Math.Max(1, (int)Math.Floor(Math.Max(0, stageHeight - 44) / _text.LineHeight));
-        _band.Height = rows * _text.LineHeight + 44;
-        _captionCanvas.Height = rows * _text.LineHeight;
-        var typeface = new Typeface(_text.FontFamily, _text.FontStyle, _text.FontWeight, _text.FontStretch);
-        double Measure(string value) => new FormattedText(value, System.Globalization.CultureInfo.CurrentCulture,
-            FlowDirection.LeftToRight, typeface, _text.FontSize, Brushes.White).WidthIncludingTrailingWhitespace;
-        var geometry = $"{width}:{rows}:{_text.FontSize}:{typeface}";
-        _presentation.ReadingWordsPerMinute = _controller.Settings.ReadingWordsPerMinute;
-        _presentation.Configure(Math.Max(1, width - 2 * side), rows, Measure, geometry,
-            _presentationClock.Elapsed.TotalSeconds);
-        if (_geometry != geometry || _presentationGeneration != _presentation.Generation)
-        {
-            _geometry = geometry; _presentationGeneration = _presentation.Generation;
-            _scrollTarget = null; _waitingForReveal = false;
-            ShowRows(_presentation.CurrentLines.ToArray(), revealNewWords: false);
-        }
-        StartNextFrame();
+        _englishCaptions.Configure(_controller.Settings.FontSize, _controller.Settings.ReadingWordsPerMinute);
+        _frenchCaptions.Configure(_controller.Settings.FontSize, _controller.Settings.ReadingWordsPerMinute);
     }
 
-    private void StartNextFrame()
-    {
-        if (_fadeClock.IsRunning) return;
-        if (_scrollTarget is not null) return;
-        var now = _presentationClock.Elapsed.TotalSeconds;
-        if (_waitingForReveal)
-        {
-            if (_wordReveal.IsAnimating(now)) { _scrollTimer.Start(); return; }
-            _waitingForReveal = false;
-            _presentation.Presented(now);
-        }
-        if (!_presentation.TryPresent(now, out var frame))
-        {
-            if (_presentation.PendingPhrases > 0) _scrollTimer.Start();
-            else if (!_wordReveal.IsAnimating(_presentationClock.Elapsed.TotalSeconds)) _scrollTimer.Stop();
-            return;
-        }
-        var target = frame!.Lines.ToArray();
-        if (frame.ScrollRows == 0)
-        {
-            ShowRows(target);
-            _waitingForReveal = true;
-            _scrollTimer.Start();
-            return;
-        }
-        _scrollRows = frame.ScrollRows;
-        _scrollTarget = target;
-        DrawRows(frame.AnimationLines.ToArray());
-        _scrollClock.Restart(); _scrollTimer.Start();
-    }
-
-    private void AnimateScroll()
-    {
-        var now = _presentationClock.Elapsed.TotalSeconds;
-        foreach (var (word, brush) in _wordBrushes) brush.Opacity = word.Opacity(now);
-        if (_scrollTarget is null) { StartNextFrame(); return; }
-        var progress = Math.Clamp(_scrollClock.Elapsed.TotalMilliseconds / 300, 0, 1);
-        var eased = progress * progress * (3 - 2 * progress);
-        for (var index = 0; index < _rowLabels.Count; index++)
-        {
-            Canvas.SetTop(_rowLabels[index], (index - eased * _scrollRows) * _text.LineHeight);
-            _rowLabels[index].Opacity = index < _scrollRows ? 1 - progress : 1;
-        }
-        if (progress < 1) return;
-        var target = _scrollTarget; _scrollTarget = null;
-        _wordReveal.RemoveLeadingRows(_scrollRows);
-        _visibleLines = target;
-        DrawRows(target, preserveReveal: true);
-        _waitingForReveal = true;
-        StartNextFrame();
-    }
-
-    private void ShowRows(string[] lines, bool revealNewWords = true)
-    {
-        _visibleLines = lines;
-        DrawRows(lines, revealNewWords: revealNewWords);
-    }
-
-    private void DrawRows(string[] lines, bool preserveReveal = false, bool revealNewWords = true)
-    {
-        var now = _presentationClock.Elapsed.TotalSeconds;
-        if (!preserveReveal) _wordReveal.Update(lines, now, revealNewWords);
-        _captionCanvas.Children.Clear(); _rowLabels.Clear(); _wordBrushes.Clear();
-        for (var index = 0; index < lines.Length; index++)
-        {
-            var label = new TextBlock { Foreground = Brushes.White,
-                FontSize = _text.FontSize, FontFamily = _text.FontFamily, FontWeight = _text.FontWeight,
-                LineHeight = _text.LineHeight, Height = _text.LineHeight, TextWrapping = TextWrapping.NoWrap };
-            AutomationProperties.SetName(label, lines[index]);
-            foreach (var word in _wordReveal.Rows[index])
-            {
-                var brush = new SolidColorBrush(Colors.White, word.Opacity(now));
-                label.Inlines!.Add(new Run(word.Text) { Foreground = brush });
-                _wordBrushes.Add((word, brush));
-            }
-            Canvas.SetTop(label, index * _text.LineHeight);
-            _captionCanvas.Children.Add(label); _rowLabels.Add(label);
-        }
-    }
     public void ToggleFullscreen() => WindowState = WindowState == WindowState.FullScreen ? WindowState.Normal : WindowState.FullScreen;
 }

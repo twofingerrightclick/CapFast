@@ -1,6 +1,6 @@
 namespace CapFast.Core;
 
-public sealed record CaptionUpdate(string UtteranceId, string Text, bool IsFinal);
+public sealed record CaptionUpdate(string UtteranceId, string Text, bool IsFinal, string? FrenchText = null);
 
 // Partial translations replace a hypothesis. They are never appended as new words.
 public sealed class CaptionBuffer

@@ -24,6 +24,7 @@ public sealed class App : Application
     private CaptionWindow? _captions;
     private SettingsWindow? _settings;
     private ErrorLogWindow? _errors;
+    private AppAppearance _appearance;
     public override void Initialize()
     {
         Name = "CapFast";
@@ -37,7 +38,9 @@ public sealed class App : Application
         menu.Items.Add(errorsItem);
         NativeMenu.SetMenu(this, menu);
         Styles.Add(new FluentTheme());
-        RequestedThemeVariant = Avalonia.Styling.ThemeVariant.Dark;
+        _appearance = AppearancePreferences.Load();
+        RequestedThemeVariant = _appearance == AppAppearance.Light
+            ? Avalonia.Styling.ThemeVariant.Light : Avalonia.Styling.ThemeVariant.Dark;
     }
 
     public override void OnFrameworkInitializationCompleted()
@@ -45,10 +48,11 @@ public sealed class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
-            _controller = new CaptionController(new CaptionSettings(loadLocalConfiguration: false) { IsLoadingConfiguration = true }, settings => settings.Provider == SpeechProvider.Google
-                ? new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.GoogleMode)
+            _controller = new CaptionController(new CaptionSettings(loadLocalConfiguration: false) { IsLoadingConfiguration = true, Appearance = _appearance }, settings => settings.Provider == SpeechProvider.Google
+                ? new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.EffectiveGoogleMode, settings.ShowFrench, settings.RejectMusic)
                 : new AzureCaptionSession(settings.AzureKey, settings.AzureRegion, settings.Locale, settings.Stabilize, settings.AudioDeviceId),
                 action => Dispatcher.UIThread.Post(action));
+            _controller.Changed += ApplyAppearance;
             _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>
                 { _settings?.Close(); _errors?.Close(); } };
             _captions.Opened += async (_, _) => await LoadLocalConfigurationAsync();
@@ -56,6 +60,17 @@ public sealed class App : Application
             InstallSettingsShortcut(_captions);
         }
         base.OnFrameworkInitializationCompleted();
+    }
+
+    private void ApplyAppearance()
+    {
+        if (_controller is null || _controller.Settings.Appearance == _appearance) return;
+        _appearance = _controller.Settings.Appearance;
+        RequestedThemeVariant = _appearance == AppAppearance.Light
+            ? Avalonia.Styling.ThemeVariant.Light : Avalonia.Styling.ThemeVariant.Dark;
+        try { AppearancePreferences.Save(_appearance); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { _controller.Errors.Add("Appearance changed, but could not be saved for the next launch. Check access to the CapFast application data folder."); }
     }
 
     private async Task LoadLocalConfigurationAsync()

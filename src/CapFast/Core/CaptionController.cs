@@ -23,9 +23,11 @@ public sealed class CaptionController
     private bool _wantLive;
     private bool _shutdown;
     private int _generation;
+    private bool _showFrench;
+    private bool _hasCaptionText;
 
     public CaptionController(CaptionSettings settings, Func<CaptionSettings, ICaptionSession> factory, Action<Action> dispatch, TimeProvider? timeProvider = null)
-    { _timeProvider = timeProvider ?? TimeProvider.System; Settings = settings; _factory = factory; _dispatch = dispatch; if (settings.ConfigurationError is { } error) Errors.Add(error); }
+    { _timeProvider = timeProvider ?? TimeProvider.System; Settings = settings; _showFrench = settings.ShowFrench; _factory = factory; _dispatch = dispatch; if (settings.ConfigurationError is { } error) Errors.Add(error); }
     public CaptionSettings Settings { get; }
     public CaptionState State { get; private set; } = CaptionState.Paused;
     public bool IsPaused => State == CaptionState.Paused;
@@ -46,10 +48,18 @@ public sealed class CaptionController
     public event Action? CaptionsFading;
     public event Action? LocalConfigurationLoaded;
     public Func<bool>? CanAcceptCaptions { get; set; }
-    public void SettingsChanged() => Changed?.Invoke();
+    public void SettingsChanged()
+    {
+        if (_showFrench != Settings.ShowFrench)
+        {
+            _showFrench = Settings.ShowFrench;
+            ClearCaptions();
+        }
+        else Changed?.Invoke();
+    }
     public void NotifyLocalConfigurationLoaded() { LocalConfigurationLoaded?.Invoke(); Changed?.Invoke(); }
     public void ClearCaptions()
-    { CancelInactivityCountdown(); _buffer.Clear(); CaptionUtteranceId = null; CaptionsCleared?.Invoke(); Changed?.Invoke(); }
+    { CancelInactivityCountdown(); _buffer.Clear(); _hasCaptionText = false; CaptionUtteranceId = null; CaptionsCleared?.Invoke(); Changed?.Invoke(); }
     public Task PauseForDisplayBacklogAsync() => _shutdown ? Task.CompletedTask : PauseWithErrorAsync(DisplayBacklogMessage);
 
     private bool DisplayReady()
@@ -81,7 +91,8 @@ public sealed class CaptionController
     private void FadeCaptions()
     {
         CancelInactivityCountdown();
-        if (string.IsNullOrEmpty(_buffer.Text)) return;
+        if (!_hasCaptionText) return;
+        _hasCaptionText = false;
         _buffer.Clear(); CaptionUtteranceId = null;
         CaptionsFading?.Invoke(); Changed?.Invoke();
     }
@@ -121,7 +132,8 @@ public sealed class CaptionController
         update = update with { Text = EnglishCaptionFilter.Default.Filter(update.Text) };
         _buffer.Apply(update);
         if (_buffer.LastAcceptedUpdate is not { } accepted) return;
-        if (!string.IsNullOrWhiteSpace(accepted.Text)) RestartInactivityCountdown();
+        if (!string.IsNullOrWhiteSpace(accepted.Text) || !string.IsNullOrWhiteSpace(accepted.FrenchText))
+        { _hasCaptionText = true; RestartInactivityCountdown(); }
         CaptionUtteranceId = accepted.UtteranceId;
         CaptionReceived?.Invoke(accepted);
         Changed?.Invoke();
@@ -184,7 +196,7 @@ public sealed class CaptionController
                 await session.StartAsync(starting.Token);
                 if (!_wantLive || generation != _generation) { await StopAsync(); return; }
                 State = CaptionState.Live; Status = "Live — press Space to pause";
-                if (!string.IsNullOrEmpty(Text)) RestartInactivityCountdown();
+                if (_hasCaptionText) RestartInactivityCountdown();
                 Changed?.Invoke();
             }
             catch (OperationCanceledException) when (starting.IsCancellationRequested)
@@ -256,11 +268,25 @@ public sealed class CaptionController
                 ("When we work together with patience and understanding, we discover possibilities that we could not see alone.", 5, true),
                 ("Thank you for joining us and for taking the time to learn from one another.", 6, true)
             };
+            var frenchFrames = new[]
+            {
+                "Bienvenue",
+                "Bienvenue au séminaire",
+                "Bienvenue au séminaire d'aujourd'hui.",
+                "Nous partageons des idées",
+                "Nous partageons des idées ensemble.",
+                "Notre communauté rassemble des personnes aux expériences différentes, et chacun a quelque chose de précieux à apporter.",
+                "Aujourd'hui, nous allons écouter attentivement, poser des questions et réfléchir à la façon dont ces idées peuvent aider nos familles.",
+                "Un petit geste de bonté peut faire une différence durable pour une personne qui traverse une journée difficile.",
+                "Lorsque nous travaillons ensemble avec patience et compréhension, nous découvrons des possibilités que nous ne pouvions pas voir seuls.",
+                "Merci de vous joindre à nous et de prendre le temps d'apprendre les uns des autres."
+            };
             for (var i = 0; i < frames.Length; i++)
             {
                 await Task.Delay(900, token);
                 if (generation != _generation) return;
-                var update = new CaptionUpdate($"demo-{generation}-{frames[i].Phrase}", frames[i].Text, frames[i].Final);
+                var update = new CaptionUpdate($"demo-{generation}-{frames[i].Phrase}", frames[i].Text, frames[i].Final,
+                    Settings.ShowFrench ? frenchFrames[i] : null);
                 ApplyCaption(update);
             }
         }

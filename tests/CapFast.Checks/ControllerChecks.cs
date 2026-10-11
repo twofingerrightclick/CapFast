@@ -10,10 +10,11 @@ internal static class ControllerChecks
         Require(log.Entries.Count == 3 && log.Entries[0].Message == "2", "Log did not evict oldest entries");
         log.Clear(); Require(log.Entries.Count == 0, "Log clear failed");
         var sessions = new List<FakeSession>();
-        var settings = new CaptionSettings { GeminiKey = "test", AudioDeviceId = "device-one" };
+        var settings = new CaptionSettings { GeminiKey = "test", AudioDeviceId = "device-one", RejectMusic = false };
         var controller = new CaptionController(settings, snapshot =>
         {
             Require(snapshot.AudioDeviceId == "device-one", "Selected audio source lost");
+            Require(!snapshot.RejectMusic, "Disabled music rejection did not reach the session factory");
             var session = new FakeSession(); sessions.Add(session); return session;
         }, action => action());
         Require(controller.IsPaused && sessions.Count == 0, "Startup must be paused");
@@ -204,6 +205,37 @@ internal static class ControllerChecks
         filteredSession.Emit(new CaptionUpdate("only-blocked", "Late safe duplicate", true));
         Require(filteredUpdates.Last().Text == "", "Filtered final lost duplicate suppression");
         await filtered.ShutdownAsync();
+        var bilingualSettings = new CaptionSettings(loadLocalConfiguration: false) { GeminiKey = "test", FrenchEnabled = true };
+        var bilingualSession = new FakeSession(); bilingualSession.Started.SetResult();
+        var bilingualClock = new ManualClock();
+        var bilingual = new CaptionController(bilingualSettings, snapshot =>
+        {
+            Require(snapshot.ShowFrench && snapshot.EffectiveGoogleMode == GoogleCaptionMode.TwoStage,
+                "French configuration did not reach the session factory");
+            return bilingualSession;
+        }, a => a(), bilingualClock);
+        var bilingualUpdates = new List<CaptionUpdate>();
+        var bilingualFades = 0; var languageClears = 0;
+        bilingual.CaptionReceived += bilingualUpdates.Add;
+        bilingual.CaptionsFading += () => bilingualFades++;
+        bilingual.CaptionsCleared += () => languageClears++;
+        await bilingual.ToggleAsync();
+        bilingualSession.Emit(new CaptionUpdate("pair", "Welcome FUCK everyone.", true, "Bienvenue à tous."));
+        Require(bilingualUpdates.Single() == new CaptionUpdate("pair", "Welcome everyone.", true, "Bienvenue à tous."),
+            "English display filtering lost the French translation or pair identity");
+        bilingualSession.Emit(new CaptionUpdate("french-only", "sex", true, "La séance commence."));
+        bilingualClock.Advance(14);
+        Require(bilingualFades == 0, "French-only visible text expired early");
+        bilingualClock.Advance(1);
+        Require(bilingualFades == 1, "Bilingual captions did not fade after inactivity");
+        bilingualSession.Emit(new CaptionUpdate("only-french-after-clear", "sex", true, "La séance continue."));
+        bilingualClock.Advance(15);
+        Require(bilingualFades == 2 && bilingual.Text == "", "French text failed to fade when English history was empty");
+        await bilingual.PauseAsync();
+        bilingualSettings.FrenchEnabled = false; bilingual.SettingsChanged();
+        Require(languageClears == 1 && bilingual.CaptionUtteranceId is null && !bilingualSettings.ShowFrench,
+            "Changing caption languages retained stale bilingual captions");
+        await bilingual.ShutdownAsync();
         Console.WriteLine("Controller checks passed: paused startup, selected source, pause during connect, rapid resume, stale callbacks, retained captions, shutdown, missing configuration, rolling log.");
     }
     private static void Require(bool valid, string message) { if (!valid) throw new Exception(message); }

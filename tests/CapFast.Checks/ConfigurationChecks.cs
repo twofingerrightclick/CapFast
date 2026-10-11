@@ -16,6 +16,22 @@ internal static class ConfigurationChecks
         var previousRegion = Environment.GetEnvironmentVariable("AZURE_SPEECH_REGION");
         try
         {
+            var appearanceFile = file + ".appearance";
+            try
+            {
+                if (AppearancePreferences.Load(appearanceFile) != AppAppearance.Dark)
+                    throw new Exception("Missing appearance preference did not default to dark.");
+                AppearancePreferences.Save(AppAppearance.Light, appearanceFile);
+                if (AppearancePreferences.Load(appearanceFile) != AppAppearance.Light)
+                    throw new Exception("Light appearance did not survive reload.");
+                AppearancePreferences.Save(AppAppearance.Dark, appearanceFile);
+                if (AppearancePreferences.Load(appearanceFile) != AppAppearance.Dark)
+                    throw new Exception("Dark appearance did not survive reload.");
+                File.WriteAllText(appearanceFile, "invalid");
+                if (AppearancePreferences.Load(appearanceFile) != AppAppearance.Dark)
+                    throw new Exception("Invalid appearance preference did not fall back safely.");
+            }
+            finally { File.Delete(appearanceFile); }
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", null);
             Environment.SetEnvironmentVariable("GOOGLE_API_KEY", null);
             Environment.SetEnvironmentVariable("AZURE_SPEECH_KEY", null);
@@ -26,6 +42,11 @@ internal static class ConfigurationChecks
                 throw new Exception("Local config parse failed");
             if (new LocalConfiguration(file, readValues: false).GoogleKey != "") throw new Exception("Deferred configuration read local contents");
             var deferred = new CaptionSettings(loadLocalConfiguration: false) { IsLoadingConfiguration = true, GeminiKey = "manual-google" };
+            if (deferred.RejectMusic || deferred.Copy().RejectMusic)
+                throw new Exception("Music rejection did not default off in new settings.");
+            deferred.RejectMusic = true;
+            if (!deferred.Copy().RejectMusic)
+                throw new Exception("Music rejection choice was lost from the session settings snapshot.");
             if (deferred.ConfigurationPath != LocalConfiguration.FallbackPath || !deferred.Copy().IsLoadingConfiguration)
                 throw new Exception("Deferred startup did not retain a probe-free fallback/loading state");
             deferred.ApplyLocalConfiguration(config, "", "", "");

@@ -9,6 +9,7 @@ public sealed record SpeechGateResult(AudioActivity Activity, IReadOnlyList<byte
 public sealed class SpeechAudioGate
 {
     public const int FrameBytes = 3200;
+    private readonly bool _rejectMusic;
     private readonly List<byte[]> _candidate = new();
     private readonly List<byte[]> _gap = new();
     private int _speechFrames;
@@ -16,11 +17,14 @@ public sealed class SpeechAudioGate
     private bool _open;
     public bool IsOpen => _open;
 
+    public SpeechAudioGate(bool rejectMusic = true) => _rejectMusic = rejectMusic;
+
     public SpeechGateResult Process(byte[] pcm, AudioFrameKind kind)
     {
         if (pcm.Length != FrameBytes) throw new InvalidDataException("Invalid local audio frame.");
         if (kind is not (AudioFrameKind.Quiet or AudioFrameKind.Speech or AudioFrameKind.Music))
             throw new InvalidDataException("Invalid local audio activity.");
+        if (kind == AudioFrameKind.Music && !_rejectMusic) kind = AudioFrameKind.Speech;
         if (kind == AudioFrameKind.Music)
         {
             var end = _open;

@@ -42,6 +42,15 @@ public static class SpeechAudioGateChecks
         Check(music.Audio.Count == 0 && music.EndStream && music.Activity == AudioActivity.Music && !gate.IsOpen,
             "Music was uploaded or failed to close qualified speech immediately.");
         Check(!gate.Process(Frame(20), AudioFrameKind.Music).EndStream, "Music repeatedly ended an already closed stream.");
+        var manualMusicGate = new SpeechAudioGate(rejectMusic: false);
+        for (var i = 0; i < 19; i++)
+            Check(manualMusicGate.Process(Frame(i), AudioFrameKind.Music).Audio.Count == 0,
+                "Music-labeled audio uploaded before two seconds with music rejection off.");
+        var manualMusic = manualMusicGate.Process(Frame(19), AudioFrameKind.Music);
+        Check(manualMusic.Audio.Count == 20 && manualMusic.Activity == AudioActivity.Speech && !manualMusic.EndStream,
+            "Music-labeled speech did not qualify when music rejection was off.");
+        Check(manualMusicGate.Process(Frame(20), AudioFrameKind.Music).Audio.Count == 1,
+            "Music-labeled speech stopped streaming when music rejection was off.");
         for (var i = 0; i < 19; i++) gate.Process(Frame(i), AudioFrameKind.Speech);
         gate.Process(Frame(0), AudioFrameKind.Music);
         Check(gate.Process(Frame(0), AudioFrameKind.Speech).Audio.Count == 0, "Music retained the pre-qualification speech candidate.");
