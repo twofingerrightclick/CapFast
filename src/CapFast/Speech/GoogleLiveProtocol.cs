@@ -14,15 +14,11 @@ public static class GoogleLiveProtocol
         return JsonDocument.Parse(message);
     }
 
-    public static string LiveModel(GoogleCaptionMode mode) => mode == GoogleCaptionMode.TwoStage
-        ? "gemini-3.5-transcribe-live" : "gemini-3.5-live-translate-preview";
+    public static string LiveModel() => "gemini-3.5-transcribe-live";
 
-    public static object CreateSetup(GoogleCaptionMode mode) => mode == GoogleCaptionMode.TwoStage
-        ? new { setup = new { model = "models/gemini-3.5-transcribe-live",
-            generationConfig = new { responseModalities = new[] { "TEXT" } },
-            inputAudioTranscription = new { languageCodes = new[] { "sw-KE" }, mode = "VERBATIM" } } }
-        : (object)new { setup = new { model = "models/gemini-3.5-live-translate-preview",
-            generationConfig = new { responseModalities = new[] { "AUDIO" },
-                translationConfig = new { targetLanguageCode = "en", echoTargetLanguage = true } },
-            outputAudioTranscription = new { } } };
+    public static object CreateSetup() => new { setup = new { model = "models/gemini-3.5-transcribe-live",
+        generationConfig = new { responseModalities = new[] { "TEXT" } },
+        // These are recognition biases, not a fixed source assignment. The
+        // model may still identify switches between the three speech languages.
+        inputAudioTranscription = new { mode = "VERBATIM", languageCodes = new[] { "en-US", "sw-KE", "fr-FR" } } } };
 }

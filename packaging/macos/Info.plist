@@ -11,6 +11,6 @@
   <key>CFBundleVersion</key><string>1</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>CapFast uses your audio input to stream Swahili speech to your selected translation service (Google or Azure) and display live English captions.</string>
+  <string>CapFast uses your audio input to stream speech to Google transcription and translation and display live translated captions.</string>
 </dict>
 </plist>

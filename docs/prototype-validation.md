@@ -1,3 +1,7 @@
+# Historical prototype validation
+
+This records earlier implementations, including retired providers and direct translation. The current app supports only Google transcription followed by automatic two-output text translation.
+
 # Prototype build and review
 
 ## English and French captions — October 11, 2026

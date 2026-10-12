@@ -8,16 +8,42 @@ public static class TwoStageChecks
 {
     public static async Task RunAsync()
     {
+        await TranscriptLanguageChecks.RunAsync();
+        LanguageSurfaceChecks.Run();
+        LanguageAssignmentChecks.Run();
+        await BlockTranslationChecks.RunAsync();
+        await LanguageAssignmentRegressionChecks.RunAsync();
+        var routed = new TaskCompletionSource<CaptionUpdate>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var switched = new TaskCompletionSource<CaptionUpdate>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var assignedCalls = 0;
+        await using (var assignedQueue = new SourceTranslationPipeline((text, assignment, _) =>
+        {
+            assignedCalls++;
+            return Task.FromResult(($"{assignment.Primary}:{text}", $"{assignment.Secondary}:{text}"));
+        }))
+        {
+            assignedQueue.Caption += update => { routed.TrySetResult(update); if (update.SourceLanguage == "sw") switched.TrySetResult(update); };
+            assignedQueue.TryAcceptTranscript(new("first-en", "Hello.", true, SourceLanguage: "en-US"), 0);
+            var translated = await routed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(translated.Text == "sw:Hello." && translated.FrenchText == "fr:Hello." && translated.PrimaryLanguage == "sw", "Detected English was not routed into Swahili and French.");
+            assignedQueue.TryAcceptTranscript(new("translator-sw", "Habari.", true, SourceLanguage: "sw"), 1);
+            var mixed = await switched.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(mixed.PrimaryLanguage == "en" && mixed.SecondaryLanguage == "fr" && assignedCalls == 2,
+                "Mid-block Swahili was not translated into English and French.");
+            Check(assignedQueue.Assignment?.Input == "en", "Language switch changed the speech block anchor.");
+            assignedQueue.ObserveAudio(AudioActivity.Idle, 6);
+            Check(assignedQueue.Assignment is null, "Five seconds without speech did not reset assignment.");
+        }
         StreamingSourceChecks.Run();
         var continuousSpeech = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using (var liveQueue = new SourceTranslationPipeline((source, _) =>
-        { continuousSpeech.TrySetResult(source); return Task.FromResult("We meet today."); }, coalesceWindow: TimeSpan.Zero))
+        await using (var liveQueue = new SourceTranslationPipeline((source, _, _) =>
+        { continuousSpeech.TrySetResult(source); return Task.FromResult(("We meet today.", "Nous nous réunissons aujourd'hui.")); }))
         {
-            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tuna", false), 0);
-            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tunazungumza", false), 1);
-            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tunazungumza pamoja", false), 3);
-            Check(await Task.WhenAny(continuousSpeech.Task, Task.Delay(100)) == continuousSpeech.Task,
-                "Continuous speech produced no English caption despite a stable complete source sentence before server finalization.");
+            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tuna", false, SourceLanguage: "sw"), 0);
+            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tunazungumza", false, SourceLanguage: "sw"), 1);
+            liveQueue.TryAcceptTranscript(new("continuous", "Tunakutana leo. Tunazungumza pamoja", false, SourceLanguage: "sw"), 3);
+            Check(await continuousSpeech.Task.WaitAsync(TimeSpan.FromSeconds(2)) == "Tunakutana leo.",
+                "Continuous speech lost a stable complete source sentence before server finalization.");
         }
         var parser = new GeminiInputTranscript();
         IReadOnlyList<CaptionUpdate> Apply(string json)
@@ -29,8 +55,8 @@ public static class TwoStageChecks
         var revised = Apply("""{"serverContent":{"interimInputTranscription":{"text":"Tutaonana Jumanne"}}}""").Single();
         Check(revised.Text == "Tutaonana Jumanne" && revised.UtteranceId == partial.UtteranceId && !revised.IsFinal,
             "Interim hypotheses were appended rather than replaced.");
-        var final = Apply("""{"serverContent":{"inputTranscription":{"text":"Tutaonana Jumanne.","startOffset":"0s","endOffset":"2s"}}}""").Single();
-        Check(final.IsFinal && final.Text == "Tutaonana Jumanne." && final.UtteranceId == partial.UtteranceId,
+        var final = Apply("""{"serverContent":{"inputTranscription":{"text":"Tutaonana Jumanne.","languageCode":"sw-KE","startOffset":"0s","endOffset":"2s"}}}""").Single();
+        Check(final.SourceLanguage == "sw" && final.IsFinal && final.Text == "Tutaonana Jumanne." && final.UtteranceId == partial.UtteranceId,
             "Authoritative final transcript required a completion marker or retained a stale hypothesis.");
         Check(Apply("""{"serverContent":{"inputTranscription":{"text":"Tutaonana Jumanne.","startOffset":"0s","endOffset":"2s"}}}""").Count == 0,
             "A duplicate timestamped final was emitted twice.");
@@ -45,9 +71,10 @@ public static class TwoStageChecks
         try { using var invalid = GoogleLiveProtocol.ParseMessage(new byte[2 * 1024 * 1024 + 1], WebSocketMessageType.Binary); throw new Exception("Oversized frame accepted."); }
         catch (InvalidDataException) { }
 
-        var setup = JsonSerializer.SerializeToElement(GoogleLiveProtocol.CreateSetup(GoogleCaptionMode.TwoStage)).GetProperty("setup");
+        var setup = JsonSerializer.SerializeToElement(GoogleLiveProtocol.CreateSetup()).GetProperty("setup");
         Check(setup.GetProperty("generationConfig").GetProperty("responseModalities")[0].GetString() == "TEXT"
-            && setup.GetProperty("inputAudioTranscription").GetProperty("languageCodes")[0].GetString() == "sw-KE"
+            && setup.GetProperty("inputAudioTranscription").GetProperty("languageCodes")
+                .EnumerateArray().Select(value => value.GetString()).SequenceEqual(new[] { "en-US", "sw-KE", "fr-FR" })
             && !setup.TryGetProperty("outputAudioTranscription", out _), "Two-stage setup uses the wrong transcription schema.");
         var request = JsonSerializer.SerializeToElement(FlashTextTranslator.CreateRequest("source-only-sentinel"));
         Check(request.GetProperty("generationConfig").GetProperty("maxOutputTokens").GetInt32() == 4096
@@ -62,100 +89,55 @@ public static class TwoStageChecks
         try { FlashTextTranslator.ParseResponse(truncated.RootElement); throw new Exception("Truncated translation was accepted."); }
         catch (CaptionSessionException) { }
 
-        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseFirst = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var allReceived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await CheckAssignedQueueLifecycleAsync();
+        Console.WriteLine("Two-stage checks passed: authoritative segments, interim replacement, timestamp deduplication, protocol, ordered bounded translations, pause cancellation, and safe errors.");
+    }
+
+    private static async Task CheckAssignedQueueLifecycleAsync()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<(string, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = new List<string>();
         var captions = new List<CaptionUpdate>();
-        await using (var queue = new SourceTranslationPipeline(async (source, token) =>
+        await using (var queue = new SourceTranslationPipeline((source, _, token) =>
         {
             calls.Add(source);
-            if (source == "one") { firstEntered.TrySetResult(); return await releaseFirst.Task.WaitAsync(token); }
-            return "English two";
-        }, coalesceWindow: TimeSpan.Zero))
+            if (source == "One.") { entered.TrySetResult(); return release.Task.WaitAsync(token); }
+            return Task.FromResult(("Two translated.", "Deux traduit."));
+        }))
         {
-            queue.Caption += update => { captions.Add(update); if (captions.Count == 2) allReceived.TrySetResult(); };
-            queue.TryEnqueue(new("1", "interim", false));
-            queue.TryEnqueue(new("1", "one", true));
-            await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            queue.TryEnqueue(new("1", "duplicate", true));
-            queue.TryEnqueue(new("2", "two", true));
-            Check(calls.Count == 1, "Translation requests ran concurrently or provisional text was translated.");
-            releaseFirst.TrySetResult("English one");
-            await allReceived.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            Check(calls.SequenceEqual(new[] { "one", "two" }) && captions.Select(c => c.Text).SequenceEqual(new[] { "English one", "English two" }),
-                "Translations were duplicated or displayed out of source order.");
+            queue.Caption += update => { captions.Add(update); if (captions.Count == 2) received.TrySetResult(); };
+            queue.TryAcceptTranscript(new("one", "One.", true, SourceLanguage: "en"), 0);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            queue.TryAcceptTranscript(new("one", "One.", true, SourceLanguage: "en"), 0);
+            queue.TryAcceptTranscript(new("two", "Two.", true, SourceLanguage: "en"), 1);
+            Check(calls.Count == 1, "Later same-block translation overtook earlier work.");
+            release.SetResult(("One translated.", "Un traduit."));
+            await received.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Check(calls.SequenceEqual(new[] { "One.", "Two." }) && captions.All(update => update.FrenchText is not null),
+                "Assigned translations duplicated source or lost complete output pairs.");
         }
 
-        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var late = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pausedEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var late = new TaskCompletionSource<(string, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
         var outputAfterPause = 0;
-        var paused = new SourceTranslationPipeline((_, _) => { entered.TrySetResult(); return late.Task; }, capacity: 1, coalesceWindow: TimeSpan.Zero);
+        var paused = new SourceTranslationPipeline((_, _, _) => { pausedEntered.TrySetResult(); return late.Task; }, capacity: 1);
         paused.Caption += _ => Interlocked.Increment(ref outputAfterPause);
-        paused.TryEnqueue(new("active", "active", true));
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        Check(paused.TryEnqueue(new("queued", "queued", true)) && !paused.TryEnqueue(new("overflow", "overflow", true)),
-            "Translation backlog was not bounded.");
+        paused.TryAcceptTranscript(new("active", "Active.", true, SourceLanguage: "en"), 0);
+        await pausedEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Check(!paused.TryAcceptTranscript(new("overflow", "Overflow.", true, SourceLanguage: "en"), 1), "Assigned backlog was not bounded.");
         await paused.DisposeAsync();
-        late.TrySetResult("Must never appear after pause");
+        late.SetResult(("Stale.", "Périmé."));
         await paused.Completion.WaitAsync(TimeSpan.FromSeconds(2));
-        Check(outputAfterPause == 0 && !paused.TryEnqueue(new("after", "after", true)), "Paused translation emitted stale captions or accepted new work.");
+        Check(outputAfterPause == 0 && !paused.TryAcceptTranscript(new("after", "After.", true, SourceLanguage: "en"), 2),
+            "Pause emitted stale captions or accepted new source.");
 
         var failed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using (var queue = new SourceTranslationPipeline((_, _) => throw new IOException("key-secret-sentinel"), coalesceWindow: TimeSpan.Zero))
-        {
-            queue.Failed += text => failed.TrySetResult(text);
-            queue.TryEnqueue(new("failure", "source", true));
-            Check(!(await failed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Contains("key-secret-sentinel"), "An arbitrary translation exception exposed sensitive details.");
-        }
-        var merged = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var mergedCaption = new TaskCompletionSource<CaptionUpdate>(TaskCreationOptions.RunContinuationsAsynchronously);
-        IReadOnlyList<CaptionUpdate>? batch = null;
-        await using (var queue = new SourceTranslationPipeline((source, _) =>
-        { merged.TrySetResult(source); return Task.FromResult("without paying duty."); }))
-        {
-            queue.BatchStarted += sources => batch = sources;
-            queue.Caption += caption => mergedCaption.TrySetResult(caption);
-            queue.TryEnqueue(new("prefix", "ziliingia nchini bila", true));
-            queue.TryEnqueue(new("suffix", "kulipiwa ushuru.", true));
-            Check(await merged.Task.WaitAsync(TimeSpan.FromSeconds(2)) == "ziliingia nchini bila kulipiwa ushuru.",
-                "A split source sentence was translated as unrelated fragments.");
-            Check((await mergedCaption.Task.WaitAsync(TimeSpan.FromSeconds(2))).UtteranceId == "prefix" && batch?.Count == 2,
-                "Coalescing lost source IDs or used the wrong caption ID.");
-        }
-        var immediate = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using (var queue = new SourceTranslationPipeline((source, _) => { immediate.TrySetResult(source); return Task.FromResult("done"); }))
-        {
-            queue.TryEnqueue(new("complete", "Sentensi imekamilika.”", true));
-            Check(await immediate.Task.WaitAsync(TimeSpan.FromSeconds(1)) == "Sentensi imekamilika.”", "A punctuated sentence waited for the three-second timer.");
-        }
-        var timed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var following = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using (var queue = new SourceTranslationPipeline((source, _) =>
-        { if (source == "unfinished") timed.TrySetResult(source); else following.TrySetResult(source); return Task.FromResult("English"); }, coalesceWindow: TimeSpan.FromMilliseconds(50)))
-        {
-            queue.TryEnqueue(new("timed", "unfinished", true));
-            await timed.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            queue.TryEnqueue(new("following", "Next sentence.", true));
-            Check(await following.Task.WaitAsync(TimeSpan.FromSeconds(2)) == "Next sentence.", "An abandoned timed read consumed the next segment.");
-        }
-        var canceledCalls = 0;
-        var canceledBuffer = new SourceTranslationPipeline((_, _) => { Interlocked.Increment(ref canceledCalls); return Task.FromResult("stale"); });
-        canceledBuffer.TryEnqueue(new("canceled", "Unfinished source", true));
-        await canceledBuffer.DisposeAsync();
-        Check(canceledCalls == 0, "Canceling the sentence buffer still launched a translation.");
-        var boundedTexts = new List<string>();
-        var boundedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using (var queue = new SourceTranslationPipeline((source, _) =>
-        { boundedTexts.Add(source); if (boundedTexts.Count == 2) boundedDone.TrySetResult(); return Task.FromResult("English"); }))
-        {
-            queue.TryEnqueue(new("limit-first", new string('a', 700), true));
-            queue.TryEnqueue(new("limit-second", new string('b', 400) + ".", true));
-            await boundedDone.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            Check(boundedTexts.Count == 2 && boundedTexts[0].Length == 700 && boundedTexts[1].Length == 401,
-                "The sentence character limit lost or over-merged a queued segment.");
-        }
-        Console.WriteLine("Two-stage checks passed: authoritative segments, interim replacement, timestamp deduplication, protocol, ordered bounded translations, pause cancellation, and safe errors.");
+        await using var failure = new SourceTranslationPipeline((_, _, _) => throw new IOException("key-secret-sentinel"));
+        failure.Failed += message => failed.TrySetResult(message);
+        failure.TryAcceptTranscript(new("failure", "Source.", true, SourceLanguage: "en"), 0);
+        Check(!(await failed.Task.WaitAsync(TimeSpan.FromSeconds(2))).Contains("key-secret-sentinel"), "Provider exception exposed sensitive details.");
     }
 
     private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }

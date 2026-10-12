@@ -17,9 +17,7 @@ internal static class Program
             var root = Directory.GetCurrentDirectory();
             var limit = 12;
             var run = args.Contains("--run");
-            var mode = GoogleCaptionMode.LiveTranslate;
             var normalize = false;
-            var echoTarget = !args.Contains("--no-echo-target");
             string? clipId = null;
             var manifestPath = Path.Combine(root, "swahili-pack", "manifest.json");
             var output = Path.Combine(root, "artifacts", "swahili-audio", DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ"));
@@ -27,12 +25,10 @@ internal static class Program
             {
                 if (args[i] == "--limit") limit = int.Parse(args[++i]);
                 else if (args[i] == "--output") output = Path.GetFullPath(args[++i]);
-                else if (args[i] == "--mode") mode = args[++i] switch { "live" => GoogleCaptionMode.LiveTranslate, "twostage" => GoogleCaptionMode.TwoStage, _ => throw new SafeError("Mode must be live or twostage.") };
                 else if (args[i] == "--normalize-audio") normalize = true;
                 else if (args[i] == "--clip-id") clipId = args[++i];
                 else if (args[i] == "--manifest") manifestPath = Path.GetFullPath(args[++i]);
-                else if (args[i] == "--no-echo-target") { }
-                else if (args[i] != "--run") throw new SafeError("Use --run, --mode live|twostage, --limit 1..12, and --output NEW_DIRECTORY.");
+                else if (args[i] != "--run") throw new SafeError("Use --run, --limit 1..12, and --output NEW_DIRECTORY.");
             }
             if (limit is < 1 or > 12) throw new SafeError("Limit must be 1..12.");
             if (Directory.Exists(output)) throw new SafeError("Choose a new output directory.");
@@ -50,7 +46,7 @@ internal static class Program
                 var id = clip.GetProperty("id").ToString();
                 var filename = clip.GetProperty("localAudio").GetString()!;
                 var pcm = ReadPcm(Path.Combine(Path.GetDirectoryName(manifestPath)!, filename), normalize, out var gain, out var rms, out var peak);
-                var result = run ? await ReplayAsync(pcm, key, mode, echoTarget) : new ReplayResult();
+                var result = run ? await ReplayAsync(pcm, key) : new ReplayResult();
                 failures |= result.Error is not null;
                 reports.Add(new
                 {
@@ -64,11 +60,10 @@ internal static class Program
                 });
                 await File.WriteAllTextAsync(Path.Combine(output, "results.json"), JsonSerializer.Serialize(new
                 {
-                    mode = run ? mode.ToString() : "dry-run", model = GoogleLiveProtocol.LiveModel(mode),
-                    translationModel = mode == GoogleCaptionMode.TwoStage ? FlashTextTranslator.Model : null,
+                    mode = run ? "TwoStage" : "dry-run", model = GoogleLiveProtocol.LiveModel(),
+                    translationModel = FlashTextTranslator.Model,
                     manifestPath,
                     normalizedAudio = normalize,
-                    echoTargetLanguage = mode == GoogleCaptionMode.LiveTranslate ? echoTarget : (bool?)null,
                     methodology = "Independent per-clip sessions; mono PCM16 16kHz paced in 100ms chunks, approximately 2 seconds trailing silence, audioStreamEnd, 15 seconds drain plus bounded pending translation wait. English references are never sent. Output audio discarded. This bypasses microphone/BlackHole and the caption UI. Opt-in normalization amplifies float samples to peak 0.8 before PCM16 conversion; originals are preserved.",
                     reports
                 }, JsonOptions));
@@ -127,7 +122,7 @@ internal static class Program
         return pcm;
     }
 
-    private static async Task<ReplayResult> ReplayAsync(byte[] pcm, string key, GoogleCaptionMode mode, bool echoTarget)
+    private static async Task<ReplayResult> ReplayAsync(byte[] pcm, string key)
     {
         var report = new ReplayResult();
         using var socket = new ClientWebSocket();
@@ -135,24 +130,25 @@ internal static class Program
         socket.Options.CollectHttpResponseDetails = true;
         using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(pcm.Length / 32000d + 50));
         var setup = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var parser = new GeminiTranscript();
         var inputParser = new GeminiInputTranscript();
         var watch = Stopwatch.StartNew();
         Task? receiver = null;
         var finals = new List<string>();
-        string partial = "";
         var acceptedSources = 0;
         var completedCaptions = 0;
         var currentBatchSize = 1;
-        using var translator = mode == GoogleCaptionMode.TwoStage ? new FlashTextTranslator(key) : null;
-        await using var pipeline = translator is null ? null : new SourceTranslationPipeline(async (source, token) =>
+        using var detector = new FlashTextTranslator(key, targetLanguage: "language code", languageDetection: true);
+        var languages = new TranscriptLanguageResolver();
+        await using var pipeline = new SourceTranslationPipeline(async (source, assignment, token) =>
         {
             var start = watch.Elapsed.TotalSeconds;
-            var translation = await translator.TranslateAsync(source, token);
-            report.Translations.Add(new TranslationEvent(source.Replace(key, "[REDACTED]"), translation, start, watch.Elapsed.TotalSeconds, currentBatchSize));
-            return translation;
-        }, lifetime.Token, coalesceWindow: TimeSpan.Zero);
-        if (pipeline is not null)
+            using var primary = new FlashTextTranslator(key, sourceLanguage: SpeechLanguageAssignment.Name(assignment.Input), targetLanguage: SpeechLanguageAssignment.Name(assignment.Primary));
+            using var secondary = new FlashTextTranslator(key, sourceLanguage: SpeechLanguageAssignment.Name(assignment.Input), targetLanguage: SpeechLanguageAssignment.Name(assignment.Secondary));
+            var one = primary.TranslateAsync(source, token); var two = secondary.TranslateAsync(source, token);
+            await Task.WhenAll(one, two);
+            report.Translations.Add(new TranslationEvent(source.Replace(key, "[REDACTED]"), one.Result, start, watch.Elapsed.TotalSeconds, currentBatchSize, assignment.Input, assignment.Primary, assignment.Secondary, two.Result));
+            return (one.Result, two.Result);
+        }, lifetime.Token);
         {
             pipeline.SourceAccepted += _ => Interlocked.Increment(ref acceptedSources);
             pipeline.BatchStarted += sources => currentBatchSize = sources.Count;
@@ -165,9 +161,7 @@ internal static class Program
             connect.CancelAfter(TimeSpan.FromSeconds(20));
             await socket.ConnectAsync(new Uri("wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"), connect.Token);
             receiver = Receive();
-            var setupRequest = JsonSerializer.SerializeToNode(GoogleLiveProtocol.CreateSetup(mode))!;
-            if (mode == GoogleCaptionMode.LiveTranslate)
-                setupRequest["setup"]!["generationConfig"]!["translationConfig"]!["echoTargetLanguage"] = JsonValue.Create(echoTarget);
+            var setupRequest = JsonSerializer.SerializeToNode(GoogleLiveProtocol.CreateSetup())!;
             await Send(setupRequest, connect.Token);
             await setup.Task.WaitAsync(connect.Token);
             report.SetupSeconds = watch.Elapsed.TotalSeconds;
@@ -188,7 +182,6 @@ internal static class Program
             await Task.Delay(TimeSpan.FromSeconds(15), lifetime.Token);
             // Receive the final ASR segment, then allow a bounded in-flight translation
             // to finish instead of silently cancelling it at the fixed audio drain.
-            if (pipeline is not null)
             {
                 var deadline = watch.Elapsed + TimeSpan.FromSeconds(20);
                 while (Volatile.Read(ref completedCaptions) < Volatile.Read(ref acceptedSources) && watch.Elapsed < deadline)
@@ -206,11 +199,11 @@ internal static class Program
         {
             lifetime.Cancel(); socket.Abort();
             if (receiver is not null) try { await receiver.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
-            if (pipeline is not null) await pipeline.DisposeAsync();
+            await pipeline.DisposeAsync();
             report.PendingTranslations = Math.Max(0, acceptedSources - completedCaptions);
             if (report.PendingTranslations > 0) report.Error ??= "Audio drain ended before every finalized source segment was translated.";
-            report.Output = string.Join(" ", finals.Append(partial).Where(x => !string.IsNullOrWhiteSpace(x)));
-            if (report.Output.Length == 0) report.Error ??= "No English caption returned during the bounded replay and drain.";
+            report.Output = string.Join(" ", finals.Where(x => !string.IsNullOrWhiteSpace(x)));
+            if (report.Output.Length == 0) report.Error ??= "No caption returned during the bounded replay and drain.";
             report.ElapsedSeconds = watch.Elapsed.TotalSeconds;
         }
         return report;
@@ -248,19 +241,19 @@ internal static class Program
                     {
                         foreach (var field in new[] { "inputTranscription", "interimInputTranscription", "outputTranscription" })
                             if (content.TryGetProperty(field, out var tr) && tr.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
-                                report.Events.Add(new TranscriptEvent(field, text.GetString()!.Replace(key, "[REDACTED]"), watch.Elapsed.TotalSeconds));
+                                report.Events.Add(new TranscriptEvent(field, text.GetString()!.Replace(key, "[REDACTED]"), watch.Elapsed.TotalSeconds, tr.TryGetProperty("languageCode", out var language) ? language.GetString() : null, tr.EnumerateObject().Select(p => p.Name).ToArray()));
                         report.CompletionEvents += new[] { "generationComplete", "turnComplete" }.Count(f => content.TryGetProperty(f, out var p) && p.ValueKind == JsonValueKind.True);
                     }
-                    foreach (var update in mode == GoogleCaptionMode.TwoStage ? inputParser.Apply(root) : parser.Apply(root))
+                    foreach (var original in inputParser.Apply(root))
                     {
-                        if (pipeline is not null)
+                        var update = original;
                         {
-                            if (!pipeline.TryAcceptTranscript(update, watch.Elapsed.TotalSeconds)) throw new SafeError("Translation queue could not keep up with speech.");
-                            continue;
+                            var detected = await languages.ResolveAsync(original, detector.DetectLanguageAsync, lifetime.Token);
+                            if (detected is null) continue;
+                            update = detected;
                         }
-                        var safeText = update.Text.Replace(key, "[REDACTED]");
-                        if (update.IsFinal) { finals.Add(safeText); partial = ""; }
-                        else partial = safeText;
+                        if (!pipeline.TryAcceptTranscript(update, watch.Elapsed.TotalSeconds))
+                            throw new SafeError("Translation queue could not keep up with speech.");
                     }
                     if (report.Events.Count > 4096) throw new SafeError("Transcript event limit reached.");
                 }
@@ -275,8 +268,8 @@ internal static class Program
         }
     }
     private sealed class SafeError(string message, bool stopProvider = false) : Exception(message) { public bool StopProvider { get; } = stopProvider; }
-    private sealed record TranscriptEvent(string Kind, string Text, double Seconds);
-    private sealed record TranslationEvent(string Source, string Translation, double StartedSeconds, double FinishedSeconds, int SourceSegments);
+    private sealed record TranscriptEvent(string Kind, string Text, double Seconds, string? LanguageCode, string[] Fields);
+    private sealed record TranslationEvent(string Source, string Translation, double StartedSeconds, double FinishedSeconds, int SourceSegments, string? SourceLanguage = null, string? PrimaryLanguage = null, string? SecondaryLanguage = null, string? SecondaryTranslation = null);
     private sealed class ReplayResult
     {
         public string Output { get; set; } = "";

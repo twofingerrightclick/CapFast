@@ -1,5 +1,11 @@
 using CapFast.Core;
 
+if (args.Length == 1 && args[0] == "--configuration-checks")
+{
+    ConfigurationChecks.Run();
+    return;
+}
+
 if (args.Length == 2 && args[0] == "--speech-gate-fixtures")
 {
     SpeechAudioGateChecks.RunFixtures(args[1]);
@@ -37,31 +43,20 @@ buffer.Clear();
 Equal("", buffer.Text);
 buffer.Apply(new("2", "duplicate final after clear", true));
 Equal("", buffer.Text);
-var sequence = new CaptionSequence();
-var stream = new CaptionBuffer();
-stream.Apply(sequence.Partial("We will meet on Monday"));
-stream.Apply(sequence.Complete("azure-result-1", "We will meet on Tuesday.")!);
-Equal("We will meet on Tuesday.", stream.Text);
-if (sequence.Complete("azure-result-1", "Repeated final") is not null)
-    throw new Exception("Duplicate terminal result advanced the utterance.");
-stream.Apply(sequence.Partial("Uncertain words"));
-stream.Apply(sequence.Complete("azure-no-match", "")!);
-Equal("We will meet on Tuesday.", stream.Text);
-stream.Apply(sequence.Partial("Next speaker"));
-Equal("We will meet on Tuesday. Next speaker", stream.Text);
 var emojiTail = CaptionBuffer.Tail(string.Concat(Enumerable.Repeat("👋🏽", 1000)), 42);
 if (System.Globalization.StringInfo.ParseCombiningCharacters(emojiTail).Length != 512)
     throw new Exception("Long token limit split a text element or failed to bound the tail.");
-GeminiChecks.Run();
 CaptionFilterChecks.Run();
 CaptionLayoutChecks.Run();
 CaptionWordRevealChecks.Run();
 SpeechAudioGateChecks.Run();
 AudioConnectionPolicyChecks.Run();
-await LiveRecoveryChecks.RunAsync();
+await SourceReaderChecks.RunAsync();
 await TwoStageChecks.RunAsync();
-await FrenchChecks.RunAsync();
+await LiveRecoveryChecks.RunAsync();
 await TranslationRecoveryChecks.RunAsync();
+await CombinedTranslationChecks.RunAsync();
+await TranslationCommentaryChecks.RunAsync();
 await ControllerChecks.RunAsync();
 ConfigurationChecks.Run();
-Console.WriteLine("Caption checks passed: revisions, finalization, duplicate results, NoMatch, sequencing, bounded Unicode history, clear, and Gemini transcript events.");
+Console.WriteLine("Caption checks passed: revisions, finalization, duplicate results, bounded Unicode history, and clear.");

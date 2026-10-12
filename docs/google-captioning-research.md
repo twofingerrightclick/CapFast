@@ -1,3 +1,7 @@
+# Historical Google captioning research
+
+This dated research includes the retired direct Live Translation experiment. The current app supports only Transcribe Live followed by two-output Flash text translation; see the README for its workflow.
+
 # Google alternatives for live Swahili → English captions
 
 Research date: October 8, 2026. Primary documentation review only; no authenticated API requests, audio-quality evaluation, latency measurements, or macOS SDK build were performed. No application implementation was changed.
@@ -12,7 +16,7 @@ Gemini Live Translation uses `gemini-3.5-live-translate-preview` over a continuo
 
 The model is explicitly Preview and supports audio plus text transcript output. [Model card](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-live-translate-preview) This path requires testing the exact transcript event boundaries and revisions, session rollover, error recovery, and available project limits. General Gemini Live examples for other models do not establish that this translation model supports the same resume/compression behavior. Generated translated speech may cost money even if we discard it; check model-specific input/output pricing. [Gemini pricing](https://ai.google.dev/gemini-api/docs/pricing)
 
-**Integration inference:** A native Avalonia macOS app can use .NET WebSocket facilities for the documented WSS protocol. This is not a verified build or an assertion of an official C# Live Translation sample. Audio capture must produce PCM independently of Azure's `AudioConfig`. Use local operator credentials for a private prototype; a distributed client should use a backend-issued short-lived credential rather than embed a shared long-lived key.
+**Integration inference:** A native Avalonia macOS app can use .NET WebSocket facilities for the documented WSS protocol. This is not a verified build or an assertion of an official C# Live Translation sample. Audio capture must produce PCM through the native capture helper. Use local operator credentials for a private prototype; a distributed client should use a backend-issued short-lived credential rather than embed a shared long-lived key.
 
 ## Cloud Speech-to-Text route: model choice matters
 

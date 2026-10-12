@@ -48,9 +48,13 @@ public sealed class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
-            _controller = new CaptionController(new CaptionSettings(loadLocalConfiguration: false) { IsLoadingConfiguration = true, Appearance = _appearance }, settings => settings.Provider == SpeechProvider.Google
-                ? new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.EffectiveGoogleMode, settings.ShowFrench, settings.RejectMusic)
-                : new AzureCaptionSession(settings.AzureKey, settings.AzureRegion, settings.Locale, settings.Stabilize, settings.AudioDeviceId),
+            var saved = CaptionPreferences.Load();
+            _controller = new CaptionController(new CaptionSettings(loadLocalConfiguration: false)
+            {
+                IsLoadingConfiguration = true, Appearance = _appearance,
+                AudioDeviceId = saved.AudioDeviceId, FontSize = saved.FontSize,
+                ReadingWordsPerMinute = saved.ReadingWordsPerMinute
+            }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.RejectMusic),
                 action => Dispatcher.UIThread.Post(action));
             _controller.Changed += ApplyAppearance;
             _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>
@@ -78,8 +82,6 @@ public sealed class App : Application
         if (_controller is not { } controller || _captions is not { } captions) return;
         var settings = controller.Settings;
         var originalGoogle = settings.GeminiKey;
-        var originalAzure = settings.AzureKey;
-        var originalRegion = settings.AzureRegion;
         // Path discovery and file reads can wait for macOS authorization. Keep
         // both off the UI thread so the caption window is already usable.
         try
@@ -94,7 +96,7 @@ public sealed class App : Application
             }
             var local = await read;
             if (!captions.IsVisible) return;
-            settings.ApplyLocalConfiguration(local, originalGoogle, originalAzure, originalRegion);
+            settings.ApplyLocalConfiguration(local, originalGoogle);
             if (local.Error is { } error) controller.Errors.Add(error);
             controller.NotifyLocalConfigurationLoaded();
         }

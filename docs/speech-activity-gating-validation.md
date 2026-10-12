@@ -37,7 +37,7 @@ The initial 0.15 music threshold rejected much of the middle talk. Raising it to
 
 Pure checks cover silence, two-second qualification, opening retention/order, music reset, short pauses, exactly-once stream end, malformed frames, and bounded storage. Connection checks cover startup idle, pending partials, missing finals, stale finals, and resumed speech. Controller checks cover activity delivery and stale callbacks after pause. Independent review covered native overlap accounting, exact singing labels, offline EOF/completion, fixed classifier errors, and indicator timer cleanup. Complete checks and application builds passed with zero warnings/errors.
 
-Classifier and qualification buffering add latency. Replies shorter than two seconds are intentionally discarded. Music detection is probabilistic; faint or unfamiliar music can be missed and speech can be rejected. Google Mac capture is covered; Azure and Windows/Linux are unchanged.
+Classifier and qualification buffering add latency. Replies shorter than two seconds are intentionally discarded. Music detection is probabilistic; faint or unfamiliar music can be missed and speech can be rejected. Google Mac capture is covered; Windows/Linux capture remains unsupported.
 
 ## Packaged runtime
 

@@ -21,8 +21,8 @@ internal static class StreamingSourceChecks
         var timed = new StreamingSourceSegmenter();
         var words = "moja mbili tatu nne tano sita saba nane tisa kumi kumi-na-moja kumi-na-mbili";
         Empty(timed.Apply(new("timed", words, false), 0));
-        Empty(timed.Apply(new("timed", words + " mwisho", false), 2.9));
-        Equal("moja mbili tatu nne tano sita saba nane tisa kumi", timed.Apply(new("timed", words + " mwisho zaidi", false), 3));
+        Equal("moja mbili tatu nne tano sita saba nane tisa kumi", timed.Apply(new("timed", words + " mwisho", false), 2.9));
+        Empty(timed.Apply(new("timed", words + " mwisho zaidi", false), 3));
         Equal("kumi-na-moja kumi-na-mbili mwisho zaidi", timed.Apply(new("timed", words + " mwisho zaidi", true), 4));
 
         var revision = new StreamingSourceSegmenter();
@@ -65,6 +65,47 @@ internal static class StreamingSourceChecks
         Equal("new provisional words", stale.Apply(new("new", "new provisional words", true), 3));
         Empty(stale.Apply(new("empty", "", true), 4));
         Empty(stale.Apply(new("empty", "late repeated final", true), 5));
+
+        var rejoined = new StreamingSourceSegmenter();
+        Empty(rejoined.Apply(new("spacing", "Hasa kwa majukumu yaushahidi maalum wa jina la", false), 0));
+        Equal("Hasa kwa majukumu yaushahidi maalum wa", rejoined.Apply(new("spacing",
+            "Hasa kwa majukumu yaushahidi maalum wa jina la Yesu", false), 2.9));
+        Empty(rejoined.Apply(new("spacing",
+            "Hasa kwa majukumu yaushahidi maalum wa jina la Yesu Kristo", false), 3.1));
+        Empty(rejoined.Apply(new("spacing",
+            "Hasa kwa majukumu yaushahidi maalumwa jina la YesuKristo ulimwenguni", false), 3.6));
+        Equal("jina la Yesu Kristo ulimwenguni kote.", rejoined.Apply(new("spacing",
+            "Hasa kwa majukumu ya ushahidi maalum wa jina la Yesu Kristo ulimwenguni kote.", true), 4));
+
+        var liveRevision = new StreamingSourceSegmenter();
+        var emitted = new List<string>();
+        foreach (var (at, snapshot) in new (double, string)[]
+        {
+            (61.196, "Hasa"), (61.707, "Hasa kwa majukumu"), (62.688, "Hasa kwa majukumu ya"),
+            (63.166, "Hasa kwa majukumu ya ushahidi"),
+            (63.599, "Hasa kwa majukumu ya ushahidi maalum"),
+            (64.105, "Hasa kwa majukumu ya ushahidi maalum"),
+            (64.593, "Hasa kwa majukumu yaushahidi maalum wa"),
+            (65.072, "Hasa kwa majukumu yaushahidi maalum wa jina la"),
+            (65.579, "Hasa kwa majukumu yaushahidi maalum wa jina la Yesu"),
+            (66.019, "Hasa kwa majukumu yaushahidi maalum wa jina la Yesu Kristo"),
+            (66.517, "Hasa kwa majukumu yaushahidi maalumwa jina la Yesu Kristo"),
+            (67.036, "Hasa kwa majukumu yaushahidi maalumwa jina la Yesu Kristo ulimwenguni"),
+            (67.530, "Hasa kwa majukumu yaushahidi maalumwa jina la YesuKristo ulimwenguni kote."),
+            (68.038, "Hasa kwa majukumu yaushahidi maalumwa jina la YesuKristo ulimwenguni kote.")
+        }) emitted.AddRange(liveRevision.Apply(new("live-spacing", snapshot, false), at).Select(chunk => chunk.Text));
+        emitted.AddRange(liveRevision.Apply(new("live-spacing",
+            "Hasa kwa majukumu ya ushahidi maalum wa jina la Yesu Kristo ulimwenguni kote.", true), 68.328)
+            .Select(chunk => chunk.Text));
+        var flattened = string.Concat(string.Join(" ", emitted).Where(char.IsLetterOrDigit)).ToLowerInvariant();
+        if (flattened != "hasakwamajukumuyaushahidimaalumwajinalayesukristoulimwengunikote" ||
+            emitted.Count(text => text.Contains("Kristo", StringComparison.Ordinal)) != 1)
+            throw new Exception("Spacing corrections skipped 'jina' or repeated 'Kristo' in the live transcription trace.");
+
+        var lexicalRevision = new StreamingSourceSegmenter();
+        lexicalRevision.Apply(new("lexical", "I like cat.", false), 0);
+        Equal("I like cat.", lexicalRevision.Apply(new("lexical", "I like cat.", false), .1));
+        Equal("today.", lexicalRevision.Apply(new("lexical", "I like cats today.", true), .2));
 
         var bounded = new StreamingSourceSegmenter();
         var longText = string.Join(" ", Enumerable.Range(0, 75).Select(i => $"word{i}"));

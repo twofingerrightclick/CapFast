@@ -12,11 +12,12 @@ namespace CapFast.Views;
 public sealed class CaptionWindow : Window
 {
     private readonly CaptionController _controller;
+    private readonly LanguageSurfaceRouting _languages = new();
     private readonly CaptionSurface _englishCaptions = new();
-    private readonly CaptionSurface _frenchCaptions = new() { IsVisible = false };
-    private readonly TextBlock _englishLabel = new() { Text = "English", FontSize = 14, Opacity = .65, Margin = new Thickness(24, 10, 24, 0), IsVisible = false };
+    private readonly CaptionSurface _frenchCaptions = new();
+    private readonly TextBlock _englishLabel = new() { Text = "English / Swahili", FontSize = 14, Opacity = .65, Margin = new Thickness(24, 10, 24, 0) };
     private readonly TextBlock _frenchLabel = new() { Text = "Français", FontSize = 14, Opacity = .65, Margin = new Thickness(24, 10, 24, 0) };
-    private readonly Border _divider = new() { Background = Brushes.Gray, Opacity = .25, IsVisible = false };
+    private readonly Border _divider = new() { Background = Brushes.Gray, Opacity = .25 };
     private readonly Grid _columns;
     private readonly Grid _frenchColumn;
     private readonly Grid _stage;
@@ -35,10 +36,10 @@ public sealed class CaptionWindow : Window
         var englishColumn = new Grid { RowDefinitions = new RowDefinitions("Auto,*"),
             Children = { _englishLabel, _englishCaptions } };
         Grid.SetRow(_englishCaptions, 1);
-        _frenchColumn = new Grid { RowDefinitions = new RowDefinitions("Auto,*"), IsVisible = false,
+        _frenchColumn = new Grid { RowDefinitions = new RowDefinitions("Auto,*"),
             Children = { _frenchLabel, _frenchCaptions } };
         Grid.SetRow(_frenchCaptions, 1);
-        _columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,0,0"),
+        _columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,1,*"),
             Children = { englishColumn, _divider, _frenchColumn } };
         Grid.SetColumn(_divider, 1); Grid.SetColumn(_frenchColumn, 2);
         _stage = new Grid { Children = { _columns } };
@@ -51,12 +52,16 @@ public sealed class CaptionWindow : Window
         Opened += (_, _) => Focus();
         _controller.Changed += Refresh;
         _controller.CaptionReceived += ReceiveCaption;
+        _controller.LanguageAssignmentChanged += ApplyLanguages;
         _controller.CaptionsCleared += ClearCaption;
         _controller.CaptionsFading += FadeCaption;
-        _controller.CanAcceptCaptions = () => _englishCaptions.CanAcceptCaptions && (!_controller.Settings.ShowFrench || _frenchCaptions.CanAcceptCaptions);
+        _controller.CanAcceptCaptions = () => _englishCaptions.CanAcceptCaptions && _frenchCaptions.CanAcceptCaptions;
+        _controller.HasUnreadCaptions = () => _englishCaptions.HasUnreadCaptions || _frenchCaptions.HasUnreadCaptions;
         Closed += (_, _) => { _controller.Changed -= Refresh; _controller.CaptionReceived -= ReceiveCaption;
+            _controller.LanguageAssignmentChanged -= ApplyLanguages;
             _controller.CaptionsFading -= FadeCaption;
             _controller.CaptionsCleared -= ClearCaption; _controller.CanAcceptCaptions = null;
+            _controller.HasUnreadCaptions = null;
             _englishCaptions.Stop(); _frenchCaptions.Stop(); };
         Closing += async (_, e) =>
         {
@@ -92,23 +97,50 @@ public sealed class CaptionWindow : Window
         if (e.Key == Key.F11) { ToggleFullscreen(); return; }
     }
 
+    private CaptionState _lastRoutingState = CaptionState.Paused;
     private void Refresh()
     {
         if (!Avalonia.Threading.Dispatcher.UIThread.CheckAccess()) { Avalonia.Threading.Dispatcher.UIThread.Post(Refresh); return; }
-        var bilingual = _controller.Settings.ShowFrench;
-        _columns.ColumnDefinitions[1].Width = new GridLength(bilingual ? 1 : 0);
-        _columns.ColumnDefinitions[2].Width = bilingual ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
-        _englishLabel.IsVisible = _frenchColumn.IsVisible = _frenchCaptions.IsVisible = _divider.IsVisible = bilingual;
+        if (_controller.State == CaptionState.Starting && _lastRoutingState != CaptionState.Starting)
+            _languages.BeginRun();
+        _lastRoutingState = _controller.State;
         FitCaption();
+    }
+
+    private void ApplyLanguages(LanguageAssignment? assignment)
+    {
+        ApplyRouting(_languages.Apply(assignment));
+    }
+    private void ApplyRouting((bool ClearFirst, bool ClearSecond) clears)
+    {
+        if (clears.ClearFirst) _englishCaptions.ClearCaption();
+        if (clears.ClearSecond) _frenchCaptions.ClearCaption();
+        _englishLabel.Text = LanguageSurfaceRouting.Label(_languages.First);
+        _frenchLabel.Text = LanguageSurfaceRouting.Label(_languages.Second);
     }
 
     private void ReceiveCaption(CaptionUpdate update)
     {
         try
         {
+            if (update.PrimaryLanguage is { } primary && update.SecondaryLanguage is { } secondary)
+            {
+                if (update.IsSpeechBlockDrain)
+                    ApplyRouting(_languages.ApplyDrain(new(update.SourceLanguage!, primary, secondary, update.AssignmentEpoch)));
+                bool Submit(string code, string text)
+                {
+                    var slot = _languages.Slot(code);
+                    if (slot < 0) return true;
+                    return (slot == 0 ? _englishCaptions : _frenchCaptions).Submit(update with
+                    { UtteranceId = $"{update.UtteranceId}:{code}", Text = text, FrenchText = null });
+                }
+                var accepted = Submit(primary, update.Text);
+                accepted = Submit(secondary, update.FrenchText ?? "") && accepted;
+                if (!accepted) _ = _controller.PauseForDisplayBacklogAsync();
+                return;
+            }
             var ready = _englishCaptions.Submit(update);
-            if (_controller.Settings.ShowFrench)
-                ready = _frenchCaptions.Submit(update with { Text = update.FrenchText ?? "", FrenchText = null }) && ready;
+            ready = _frenchCaptions.Submit(update with { Text = update.FrenchText ?? "", FrenchText = null }) && ready;
             if (!ready) _ = _controller.PauseForDisplayBacklogAsync();
         }
         catch (InvalidOperationException) { _ = _controller.PauseForDisplayBacklogAsync(); }

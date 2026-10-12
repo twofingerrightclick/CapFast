@@ -5,6 +5,16 @@ public static class CaptionPresentationChecks
 {
     public static void Run()
     {
+        var reading = New(1000, 1);
+        reading.ReadingWordsPerMinute = 180;
+        reading.Submit(new("visible-long-final", string.Join(" ", Enumerable.Repeat("word", 60)), true));
+        if (!reading.HasUnreadCaptions(0)) throw new Exception("Queued words were not protected from fading.");
+        if (!reading.TryPresent(0, out _) || !reading.HasUnreadCaptions(0))
+            throw new Exception("Animating words were not protected from fading.");
+        reading.Presented(0);
+        if (reading.PendingPhrases != 0 || !reading.HasUnreadCaptions(15) || reading.HasUnreadCaptions(20))
+            throw new Exception("Visible final words were not protected for their complete reading time.");
+
         var available = New(1, 4);
         available.Submit(new("prior", "a b c", true)); Present(available, 0);
         available.Submit(new("incoming", "d e f", true));

@@ -28,20 +28,19 @@ Review preservation of meaning, names, numbers, negation, omissions, and invente
 
 ## Audio through BlackHole
 
-1. Open the bundled CapFast app, paused. Select **BlackHole 2ch** in the bottom-left audio input dropdown.
-   In Settings, keep **Swahili transcription → English translation** for the new pipeline, or choose **Live Translate (comparison)** to repeat the direct service test.
+1. Open the bundled CapFast app, paused. Select **BlackHole 2ch** in Settings. The app automatically detects each speech block’s input language and translates to the other two among English, Swahili and French.
 2. In macOS Sound settings, select **BlackHole 2ch** as the output device for playback. Note the previous output so you can restore it afterward.
-3. Focus the caption window and press **Space** to start. In Terminal, from the repository directory, play the playlist:
+3. Use **Start captions** in Settings. In Terminal, from the repository directory, play the playlist:
 
    ```sh
    afplay swahili-pack/playlist.wav
    ```
 
-4. Watch captions through all 12 clips, then press **Space** to pause. Restore your previous Mac output device.
+4. Watch captions through all 12 clips, then use **Pause captions** in Settings. Restore your previous Mac output device.
 
 Use the clip offsets in `swahili-pack/manifest.json` and the numbered reference files to identify mistakes. Repeat individual clips with `afplay swahili-pack/NUMBERED_FILE.wav` when useful. Allow the final caption to finish before pausing.
 
-Record dropped phrases, meaning errors, time from speech to usable English, repeated text, and disruptive changes to already displayed captions. The app does not export live transcripts, so this is a manual display check. The new default pipeline uses Transcribe Live and Flash; direct Live Translate remains selectable for comparison. Complete source sentences translate immediately after recognition finalizes; unfinished source fragments can wait up to three seconds for a continuation. Recognition finalization and text translation add delay beyond that buffering.
+Record dropped phrases, meaning errors, time from speech to usable English, repeated text, and disruptive changes to already displayed captions. The app does not export live transcripts, so this is a manual display check. The pipeline uses Transcribe Live and Flash. Complete source sentences translate immediately after recognition finalizes; unfinished source fragments can wait up to three seconds for a continuation. Recognition finalization and text translation add delay beyond that buffering.
 
 Dataset attribution and selection details are in [the pack README](../swahili-pack/README.md).
 
@@ -55,8 +54,7 @@ The console harness links the app's actual setup, transcript parsers, source buf
 
 ```sh
 dotnet build tools/CapFast.AudioEval/CapFast.AudioEval.csproj
-dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --mode live --output artifacts/my-live-test
-dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --mode twostage --output artifacts/my-two-stage-test
+dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --output artifacts/my-two-stage-test
 ```
 
 Output directories must be new. Without `--run`, audio validation performs no requests. `--clip-id 1581` selects one clip. `--normalize-audio` optionally raises/lowers the derived float samples to peak 0.8 before conversion; it preserves originals and is a diagnostic option, not an app feature. Some pack clips are very quiet (about −66 dBFS RMS), which can cause omissions in both models. Raw and amplified results must be reported separately.
@@ -64,7 +62,7 @@ Output directories must be new. Without `--run`, audio validation performs no re
 For the supplied talk, [the extraction manifest](../sampleTalk/extracted/manifest.json) records the original file, MP3, sample offsets, levels, and exact commands. The three 30-second samples start at 0:30, 6:33, and 11:37. The supplied Swahili transcript is untimed and there is no aligned English reference.
 
 ```sh
-dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --mode twostage --manifest sampleTalk/extracted/manifest.json --output artifacts/my-talk-test
+dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --manifest sampleTalk/extracted/manifest.json --output artifacts/my-talk-test
 ```
 
 To play a sample into BlackHole without changing the Mac's default output, the optional local Swift helper is `artifacts/PlayToDevice` (source: `tools/PlayToDevice.swift`). After starting CapFast with BlackHole selected:

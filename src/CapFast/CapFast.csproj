@@ -13,6 +13,5 @@
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.3" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.3" />
-    <PackageReference Include="Microsoft.CognitiveServices.Speech" Version="1.52.0" />
   </ItemGroup>
 </Project>

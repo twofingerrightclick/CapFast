@@ -40,6 +40,8 @@ public sealed class CaptionPresentation
     public IReadOnlyList<string> CurrentLines => _visible.Select(line => line.Text).ToArray();
     public int ReadingWordsPerMinute { get; set; } = 180;
     public bool HasPendingPresentation => _pending is not null;
+    public bool HasUnreadCaptions(double nowSeconds) => _pending is not null || _queue.Count > 0 ||
+        _visible.Any(line => line.ReadyAt > nowSeconds);
     public bool CanAcceptCaptions => _queue.Count(item => UnreadCaptureLength(item) > 0) <= 32 &&
         _queue.Sum(UnreadCaptureLength) <= 131072;
     private static int UnreadCaptureLength(Phrase phrase) => Math.Max(0, phrase.Text.Length - Math.Max(phrase.Offset, phrase.ReplayEnd));

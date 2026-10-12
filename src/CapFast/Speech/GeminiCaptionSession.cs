@@ -6,21 +6,26 @@ using CapFast.Core;
 
 namespace CapFast.Speech;
 
-public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySession, ICaptionDiagnosticsSession
+public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSession, IAudioActivitySession, ICaptionDiagnosticsSession, ILanguageAssignmentSession
 {
+    private sealed record ReceivedSource(CaptionUpdate Update, SourceTranslationPipeline.ReceivedBlock Block, double ReceivedAt, string? Hint);
     private sealed class Connection : IDisposable
     {
         public readonly ILiveTransport Transport;
         public readonly TaskCompletionSource Setup = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public readonly GeminiTranscript Transcript = new();
         public readonly GeminiInputTranscript InputTranscript = new();
+        public readonly TranscriptLanguageResolver Languages = new();
         public readonly AudioConnectionPolicy Policy;
         public readonly CancellationTokenSource Lifetime;
         public readonly double OpenedAt;
+        public long AudioGeneration;
+        public readonly Channel<ReceivedSource> Sources = Channel.CreateBounded<ReceivedSource>(32);
+        public Task? SourceWorker;
         public Task? Receiver;
         public int PlannedClose;
         public int RolloverRequested;
         public int TransportFailed;
+        public double LanguageCheckRetryAt;
         public bool UploadedAny;
         public bool StreamEnded;
         public Connection(ILiveTransport transport, CancellationToken lifetime, double now)
@@ -38,9 +43,12 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     private readonly LiveRetryBudget _retries = new();
     private double Now => _clock.Now;
     private Connection? _connection;
-    private readonly GoogleCaptionMode _mode;
-    private readonly FlashTextTranslator? _translator;
-    private readonly FlashTextTranslator? _frenchTranslator;
+    private readonly FlashTextTranslator? _languageDetector;
+    private readonly FlashMultilingualTranslator? _multilingualTranslator;
+    private readonly bool _useCombinedTranslation;
+    private readonly Func<string, CancellationToken, Task<string?>>? _detectionOverride;
+    private readonly List<Task> _sourceWorkers = new();
+    private BlockTextTranslator? _blockTranslator;
     private readonly SourceTranslationPipeline? _pipeline;
     private Process? _microphone;
     private Task? _sendAudio;
@@ -53,35 +61,59 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     private readonly bool _rejectMusic;
     private CaptionSessionException? _failure;
 
+    public LanguageAssignment? LanguageAssignment => _pipeline?.Assignment;
+    public event Action<LanguageAssignment?>? LanguageAssignmentChanged;
+    public bool CanPresentCaption(CaptionUpdate update) => _pipeline?.CanPresentCaption(update) == true;
+    public void ResetLanguageDetection() => _pipeline?.ResetForNextUtterance();
+    public void HintInputLanguage(string code) => _pipeline?.HintInputLanguage(code);
     public event Action<string>? Diagnostic;
+    internal event Action? FinalSourceRegistered;
     public event Action<AudioActivity>? AudioActivityChanged;
     public event Action<CaptionUpdate>? Caption;
     public event Action<string>? Status;
     public event Action<string>? Ended;
+    public event Action<CaptionFailure>? Failure;
 
-    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null, GoogleCaptionMode mode = GoogleCaptionMode.TwoStage,
-        bool frenchEnabled = false, bool rejectMusic = false)
-        : this(apiKey, audioDeviceId, mode, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock(), frenchEnabled, rejectMusic) { }
+    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null, bool rejectMusic = false)
+        : this(apiKey, audioDeviceId, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock(), rejectMusic) { }
 
-    internal GeminiCaptionSession(string apiKey, string? audioDeviceId, GoogleCaptionMode mode,
-        Func<ILiveTransport> transportFactory, ILiveClock clock, bool frenchEnabled = false, bool rejectMusic = false)
+    internal GeminiCaptionSession(string apiKey, string? audioDeviceId,
+        Func<ILiveTransport> transportFactory, ILiveClock clock, bool rejectMusic = false,
+        Func<string, CancellationToken, Task<string?>>? detectLanguage = null,
+        Func<string, LanguageAssignment, CancellationToken, Task<(string Primary, string Secondary)>>? drainTranslate = null,
+        Func<string, string, string?, CancellationToken, Task<MultilingualCaptionResult>>? combinedTranslate = null)
     {
         if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("A Gemini API key is required.");
         // Same header authentication used by Google's native Live SDK; no key in URLs/logs.
         _transportFactory = transportFactory;
-        _clock = clock;
+        _clock = clock; _detectionOverride = detectLanguage;
         _audioDeviceId = audioDeviceId;
         _rejectMusic = rejectMusic;
-        _mode = frenchEnabled ? GoogleCaptionMode.TwoStage : mode;
-        if (_mode == GoogleCaptionMode.TwoStage)
+        _useCombinedTranslation = combinedTranslate is not null || (detectLanguage is null && drainTranslate is null);
+        if (_useCombinedTranslation)
         {
-            _translator = new FlashTextTranslator(apiKey);
-            if (frenchEnabled) _frenchTranslator = new FlashTextTranslator(apiKey, targetLanguage: "French");
-            _pipeline = new SourceTranslationPipeline(_translator.TranslateAsync, _lifetime.Token, coalesceWindow: TimeSpan.Zero,
-                translateFrench: _frenchTranslator is null ? null : _frenchTranslator.TranslateAsync);
-            _pipeline.Caption += update => { if (!_lifetime.IsCancellationRequested) Caption?.Invoke(update); };
-            _pipeline.Failed += Fail;
+            if (combinedTranslate is null)
+            {
+                _multilingualTranslator = new(apiKey);
+                combinedTranslate = _multilingualTranslator.TranslateAsync;
+            }
         }
+        else
+        {
+            _languageDetector = new FlashTextTranslator(apiKey, targetLanguage: "language code", languageDetection: true);
+            _blockTranslator = new(apiKey);
+        }
+        Func<string, LanguageAssignment, CancellationToken, Task<(string Primary, string Secondary)>>? legacyTranslate = drainTranslate;
+        if (legacyTranslate is null && _blockTranslator is not null) legacyTranslate = _blockTranslator.TranslateAsync;
+        legacyTranslate ??= (string text, LanguageAssignment assignment, CancellationToken token) =>
+            throw new InvalidOperationException("Combined translation must handle this fragment.");
+        _pipeline = new SourceTranslationPipeline(legacyTranslate, _lifetime.Token,
+            drainTranslate: legacyTranslate, capacity: _useCombinedTranslation ? 32 : 8,
+            translateMultilingual: combinedTranslate);
+        _pipeline.AssignmentChanged += assignment => LanguageAssignmentChanged?.Invoke(assignment);
+        _pipeline.Caption += update => { if (!_lifetime.IsCancellationRequested) Caption?.Invoke(update); };
+        _pipeline.Failed += Fail;
+        _pipeline.Diagnostic += notice => Diagnostic?.Invoke(notice);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -142,7 +174,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
                     : "Gemini connection failed before setup. Check internet access, DNS, firewall, and the Gemini endpoint.");
             }
             throw new CaptionSessionException(stage == "setup"
-                ? "Gemini connected, but session setup failed or timed out. Check the selected Google Live model and configuration. Microphone permission is already granted."
+                ? "Gemini connected, but the startup deadline expired before audio capture began. Check the connection and service availability."
                 : "Gemini setup succeeded, but the Mac audio helper could not start. Check the selected input and relaunch the packaged app.");
         }
     }
@@ -185,7 +217,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
     private static string ServiceFailure(int code, string stage) => code switch
     {
         401 or 16 => $"Gemini rejected authentication ({stage} {code}). Check the Google API key in Settings.",
-        403 or 7 => $"Gemini denied access ({stage} {code}). Check API key restrictions, project billing, and Live Translate model access.",
+        403 or 7 => $"Gemini denied access ({stage} {code}). Check API key restrictions, project billing, and Transcribe Live model access.",
         404 or 5 => $"Gemini model or endpoint is unavailable ({stage} {code}). Verify access to the selected Google Live model.",
         429 or 8 => $"Gemini quota is exhausted ({stage} {code}). Check the project's quota and billing, then retry.",
         400 or 3 => $"Gemini rejected session configuration ({stage} {code}). The selected Google Live model or setup may be unsupported.",
@@ -207,9 +239,9 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         if (Has("quota", "resource_exhausted", "rate limit", "billing", "payment"))
             return $"Gemini reported a quota or billing problem ({details}). Check the Google project's quota and billing.";
         if (Has("permission denied", "permission_denied", "access denied", "api key restriction", "unregistered caller"))
-            return $"Gemini denied access ({details}). Check API key restrictions and access to the Live Translate model.";
+            return $"Gemini denied access ({details}). Check API key restrictions and access to the Transcribe Live model.";
         if (Has("model") && Has("not found", "not supported", "not available", "does not exist"))
-            return $"Gemini reported that the selected Google Live model is unavailable or unsupported ({details}). Verify access to the selected mode's model.";
+            return $"Gemini reported that the selected Google Live model is unavailable or unsupported ({details}). Verify access to Transcribe Live.";
         if (Has("unknown name", "unknown field", "invalid argument", "invalid_argument", "invalid json", "malformed", "unsupported setup", "cannot find field"))
             return $"Gemini rejected the session setup ({details}). The model or setup fields may be unsupported; microphone permission is a separate check.";
         if (Has("internal error", "internal server", "unavailable", "service error"))
@@ -223,11 +255,14 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
 
     private async Task ConnectAsync(CancellationToken token)
     {
-        var connection = new Connection(_transportFactory(), _lifetime.Token, Now);
+        var connection = new Connection(_transportFactory(), _lifetime.Token, Now) { AudioGeneration = _pipeline?.AudioGeneration ?? 0 };
         _connection = connection;
         await connection.Transport.ConnectAsync(token);
+        connection.SourceWorker = ProcessSourcesAsync(connection);
+        lock (_sourceWorkers) _sourceWorkers.Add(connection.SourceWorker);
+        _ = connection.SourceWorker.ContinueWith(task => { lock (_sourceWorkers) _sourceWorkers.Remove(task); }, TaskScheduler.Default);
         connection.Receiver = ReceiveAsync(connection);
-        await SendAsync(connection, GoogleLiveProtocol.CreateSetup(_mode), token);
+        await SendAsync(connection, GoogleLiveProtocol.CreateSetup(), token);
         await connection.Setup.Task.WaitAsync(token);
     }
 
@@ -351,17 +386,19 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
                 }
                 if (root.TryGetProperty("goAway", out _)) Interlocked.Exchange(ref connection.RolloverRequested, 1);
                 if (root.TryGetProperty("setupComplete", out _)) connection.Setup.TrySetResult();
-                var updates = _mode == GoogleCaptionMode.TwoStage ? connection.InputTranscript.Apply(root) : connection.Transcript.Apply(root);
-                foreach (var update in updates)
+                var updates = connection.InputTranscript.Apply(root);
+                foreach (var received in updates)
                 {
                     if (_lifetime.IsCancellationRequested) continue;
-                    connection.Policy.Transcript(update.IsFinal, Now);
+                    connection.Policy.Transcript(received.IsFinal, Now);
                     if (_pipeline is not null)
                     {
-                        if (!_pipeline.TryAcceptTranscript(update, Now))
-                            throw new CaptionSessionException("Translation fell behind the audio. Captions paused to avoid a growing delay; restart the session.");
+                        if (connection.AudioGeneration != _pipeline.AudioGeneration) continue;
+                        var block = _pipeline.CaptureReceivedBlock(connection.AudioGeneration);
+                        if (block.ManualRevision < 0) continue;
+                        if (!connection.Sources.Writer.TryWrite(new(received, block, Now, _pipeline.CaptureHint(received.UtteranceId))))
+                            throw new CaptionSessionException("Language identification fell behind the audio. Restart the session to continue.");
                     }
-                    else Caption?.Invoke(update);
                 }
             }
         }
@@ -378,7 +415,91 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         catch (System.Text.Json.JsonException) { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail("Gemini returned malformed session JSON. Capture paused; check service availability and start again."); }
         catch (CaptionSessionException safe) { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail(safe.Message); }
         catch { if (Volatile.Read(ref connection.PlannedClose) == 0) Fail("Gemini returned an invalid response. Capture paused; check service availability and start again."); }
-        finally { connection.Setup.TrySetException(_failure ?? new CaptionSessionException("Gemini setup did not complete. Check the selected Google Live model and retry.")); }
+        finally { connection.Sources.Writer.TryComplete(); connection.Setup.TrySetException(_failure ?? new CaptionSessionException("Gemini setup did not complete. Check the selected Google Live model and retry.")); }
+    }
+
+    private async Task ProcessSourcesAsync(Connection connection)
+    {
+        try
+        {
+            await foreach (var source in connection.Sources.Reader.ReadAllAsync(_lifetime.Token))
+            {
+                // Manual reset and hints invalidate queued recognition work. Natural
+                // retirement keeps its revision valid so received finals can drain.
+                if (!_pipeline!.IsReceivedBlockValid(source.Block)) continue;
+                try
+                {
+                    // Recognition can accumulate two speakers in one utterance.
+                    // Route each stable source chunk after segmentation, while
+                    // preserving explicit provider codes and operator hints.
+                    var trustedLanguage = SpeechLanguageAssignment.Normalize(source.Hint ?? source.Update.SourceLanguage);
+                    var resolved = source.Update with { SourceLanguage = trustedLanguage ?? "auto" };
+                    Func<string, CancellationToken, Task<string?>>? detectSegment = !_useCombinedTranslation && trustedLanguage is null
+                        ? (text, token) => DetectSegmentAsync(connection, source.Block, text, token) : null;
+                    if (resolved.IsFinal)
+                    {
+                        // Acceptance and ordering are registered synchronously by the pipeline.
+                        // Translation must not occupy the bounded recognition reader.
+                        var translation = _pipeline!.CompleteReceivedFinalAsync(resolved, source.Block, source.ReceivedAt, detectSegment);
+                        FinalSourceRegistered?.Invoke();
+                        var final = ObserveReceivedFinalAsync(translation, source.Block);
+                        lock (_sourceWorkers) _sourceWorkers.Add(final);
+                        _ = final.ContinueWith(task => { lock (_sourceWorkers) _sourceWorkers.Remove(task); }, TaskScheduler.Default);
+                    }
+                    else if (ReferenceEquals(_connection, connection) && _pipeline!.IsReceivedBlockCurrent(source.Block) &&
+                        !_pipeline.TryAcceptTranscript(resolved, source.ReceivedAt, connection.AudioGeneration, detectSegment))
+                        throw new CaptionSessionException("Translation fell behind the audio. Restart the session to continue.");
+                }
+                catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { throw; }
+                catch (Exception error)
+                {
+                    if (ReferenceEquals(_connection, connection) && Volatile.Read(ref connection.PlannedClose) == 0 && _pipeline!.IsReceivedBlockCurrent(source.Block))
+                        Fail(error is CaptionSessionException safe ? safe.Message : "Google language identification failed. Restart the session to continue.");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            // Retired recognition work cannot fail the next speech block.
+            if (ReferenceEquals(_connection, connection) && Volatile.Read(ref connection.PlannedClose) == 0)
+                Fail(error is CaptionSessionException safe ? safe.Message : "Google language identification failed. Restart the session to continue.");
+        }
+    }
+
+    private async Task<string?> DetectSegmentAsync(Connection connection, SourceTranslationPipeline.ReceivedBlock block,
+        string text, CancellationToken token)
+    {
+        lock (connection) if (Now < connection.LanguageCheckRetryAt)
+            return _pipeline!.IsReceivedBlockCurrent(block) ? "auto" : _pipeline.FallbackInput(block) ?? "auto";
+        try
+        {
+            return SpeechLanguageAssignment.Normalize(await (_detectionOverride ?? _languageDetector!.DetectLanguageAsync)(text, token)) ?? "auto";
+        }
+        catch (CaptionSessionException error) when (!error.IsTerminalService && !error.IsContentBlocked)
+        {
+            var current = _pipeline!.IsReceivedBlockCurrent(block);
+            if (current) lock (connection) connection.LanguageCheckRetryAt = Now + 2;
+            Diagnostic?.Invoke("Google language check failed; continuing with " +
+                (current ? "automatic source translation." : "the received speech block's source language.") +
+                (current ? " Retrying language identification after a short cooldown." : "") + $" {error.Message}");
+            return current ? "auto" : _pipeline.FallbackInput(block) ?? "auto";
+        }
+    }
+
+    private async Task ObserveReceivedFinalAsync(Task translation, SourceTranslationPipeline.ReceivedBlock block)
+    {
+        try { await translation; }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            // Observe faults from acceptance as well as translation. Async methods
+            // capture even failures before their first await in the returned task.
+            if (_lifetime.IsCancellationRequested || Volatile.Read(ref _disposed) != 0 || !_pipeline!.IsReceivedBlockValid(block)) return;
+            if (_pipeline!.IsReceivedBlockCurrent(block))
+                Fail(error is CaptionSessionException safe ? safe.Message : "Google text translation failed. Restart the session to continue.");
+            else Diagnostic?.Invoke("Google text translation failed for an earlier speech block; its unfinished caption is unavailable.");
+        }
     }
 
     private async Task SendAudioAsync(Process microphone)
@@ -439,11 +560,30 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         var gate = new SpeechAudioGate(_rejectMusic);
         var activity = AudioActivity.Idle;
         var recovering = false;
+        var awaitingSpeechBlock = false;
         AudioActivityChanged?.Invoke(activity);
         await foreach (var frame in frames.ReadAllAsync(_lifetime.Token))
         {
+            var blockExpired = _pipeline?.ObserveAudio(frame.Kind switch { AudioFrameKind.Speech => AudioActivity.Speech, AudioFrameKind.Music => AudioActivity.Music, _ => AudioActivity.Idle }, Now) == true;
+            if (blockExpired || (_pipeline is not null && _connection is { } currentStream && currentStream.AudioGeneration != _pipeline.AudioGeneration))
+            {
+                // A fresh recognition stream makes even a previously unseen late
+                // final belong to the retired audio generation, never the next block.
+                if (_connection is { } expired) await CloseConnectionAsync(expired);
+                gate = new SpeechAudioGate(_rejectMusic);
+                awaitingSpeechBlock = true;
+                Status?.Invoke("Listening locally — Google reconnects when speech resumes.");
+            }
+            var observedActivity = frame.Kind switch { AudioFrameKind.Speech => AudioActivity.Speech,
+                AudioFrameKind.Music => AudioActivity.Music, _ => AudioActivity.Idle };
+            if (observedActivity != activity) { activity = observedActivity; AudioActivityChanged?.Invoke(activity); }
+            if (awaitingSpeechBlock)
+            {
+                if (frame.Kind != AudioFrameKind.Speech) continue;
+                awaitingSpeechBlock = false;
+            }
             var decision = gate.Process(frame.Pcm, frame.Kind);
-            if (decision.Activity != activity) { activity = decision.Activity; AudioActivityChanged?.Invoke(activity); }
+
             var connection = _connection;
             if (connection is not null)
             {
@@ -555,7 +695,11 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         _lifetime.Cancel();
         _connection?.Transport.Abort();
         try { if (_microphone is { HasExited: false }) _microphone.Kill(); } catch { }
-        if (_microphone is not null) Ended?.Invoke(message);
+        if (_microphone is not null)
+        {
+            Failure?.Invoke(new(message, CaptionFailurePolicy.RequiresOperatorAction(message)));
+            Ended?.Invoke(message);
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -565,12 +709,15 @@ public sealed class GeminiCaptionSession : ICaptionSession, IAudioActivitySessio
         _connection?.Transport.Abort();
         try { if (_microphone is { HasExited: false }) _microphone.Kill(); } catch { }
         if (_pipeline is not null) await _pipeline.DisposeAsync();
-        var completion = Task.WhenAll(new[] { _connection?.Receiver, _sendAudio, _readAudio, _monitorAudio }.OfType<Task>());
+        Task[] sources;
+        lock (_sourceWorkers) sources = _sourceWorkers.ToArray();
+        var completion = Task.WhenAll(new[] { _connection?.Receiver, _sendAudio, _readAudio, _monitorAudio }.OfType<Task>().Concat(sources));
         try { await completion.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
         _microphone?.Dispose();
         _connection?.Dispose();
-        _translator?.Dispose();
-        _frenchTranslator?.Dispose();
+        _blockTranslator?.Dispose();
+        _languageDetector?.Dispose();
+        _multilingualTranslator?.Dispose();
         // Canceled workers can still finish after the timeout; dispose CTS when all finish.
         _ = completion.ContinueWith(_ => _lifetime.Dispose(), CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);

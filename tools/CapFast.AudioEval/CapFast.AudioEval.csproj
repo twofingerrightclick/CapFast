@@ -8,13 +8,18 @@
   <ItemGroup>
     <Compile Include="../../src/CapFast/Core/LocalConfiguration.cs" Link="LocalConfiguration.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionBuffer.cs" Link="CaptionBuffer.cs" />
-    <Compile Include="../../src/CapFast/Core/GeminiTranscript.cs" Link="GeminiTranscript.cs" />
-    <Compile Include="../../src/CapFast/Core/GoogleCaptionMode.cs" Link="GoogleCaptionMode.cs" />
     <Compile Include="../../src/CapFast/Core/GeminiInputTranscript.cs" Link="GeminiInputTranscript.cs" />
     <Compile Include="../../src/CapFast/Core/StreamingSourceSegmenter.cs" Link="StreamingSourceSegmenter.cs" />
     <Compile Include="../../src/CapFast/Speech/GoogleLiveProtocol.cs" Link="GoogleLiveProtocol.cs" />
     <Compile Include="../../src/CapFast/Speech/FlashTextTranslator.cs" Link="FlashTextTranslator.cs" />
+    <Compile Include="../../src/CapFast/Speech/FlashMultilingualTranslator.cs" Link="FlashMultilingualTranslator.cs" />
+    <Compile Include="../../src/CapFast/Speech/MultilingualCaptionResult.cs" Link="MultilingualCaptionResult.cs" />
     <Compile Include="../../src/CapFast/Speech/SourceTranslationPipeline.cs" Link="SourceTranslationPipeline.cs" />
     <Compile Include="../../src/CapFast/Speech/CaptionSessionException.cs" Link="CaptionSessionException.cs" />
+    <Compile Include="../../src/CapFast/Core/SpeechLanguageAssignment.cs" Link="SpeechLanguageAssignment.cs" />
+    <Compile Include="../../src/CapFast/Speech/IAudioActivitySession.cs" Link="IAudioActivitySession.cs" />
+    <Compile Include="../../src/CapFast/Core/SpeechAudioGate.cs" Link="SpeechAudioGate.cs" />
+    <Compile Include="../../src/CapFast/Core/CaptionContentSafety.cs" Link="CaptionContentSafety.cs" />
+    <Compile Include="../../src/CapFast/Core/TranscriptLanguageResolver.cs" Link="TranscriptLanguageResolver.cs" />
   </ItemGroup>
 </Project>

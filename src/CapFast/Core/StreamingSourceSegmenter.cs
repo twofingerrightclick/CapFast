@@ -69,9 +69,9 @@ public sealed class StreamingSourceSegmenter
                 }
             }
             if (sentenceEnd >= 0) _pendingSince = start < words.Count ? nowSeconds : null;
-            else if (_pendingSince is { } since && nowSeconds - since >= 3 && stable - 3 >= 6)
+            else if (_pendingSince is { } since && nowSeconds - since >= 2 && stable - 2 >= 4)
             {
-                Emit(words, start, Math.Min(18, stable - 3), result);
+                Emit(words, start, Math.Min(18, stable - 2), result);
                 _pendingSince = nowSeconds;
             }
         }
@@ -92,6 +92,42 @@ public sealed class StreamingSourceSegmenter
     private int Align(List<Word> words)
     {
         if (_consumed.Count == 0) return 0;
+        // The recognizer often rejoins or splits words in later hypotheses:
+        // "ya ushahidi" -> "yaushahidi", "YesuKristo" -> "Yesu Kristo".
+        // If the flattened lexical prefix is unchanged, align at its actual
+        // new word boundary before the edit-distance fallback. Counting old
+        // tokens would skip a new word or replay a translated suffix.
+        var consumedChars = string.Concat(_consumed.Select(word => word.Key));
+        var matchedChars = 0;
+        for (var index = 0; index < words.Count && matchedChars < consumedChars.Length; index++)
+        {
+            var word = words[index];
+            var remaining = consumedChars.Length - matchedChars;
+            if (word.Key.Length <= remaining)
+            {
+                if (!word.Key.AsSpan().SequenceEqual(consumedChars.AsSpan(matchedChars, word.Key.Length))) break;
+                matchedChars += word.Key.Length;
+                if (matchedChars == consumedChars.Length) return index + 1;
+            }
+            else if (word.Key.AsSpan(0, remaining).SequenceEqual(consumedChars.AsSpan(matchedChars)) &&
+                // Only split a plain Latin word; Unicode normalization and
+                // punctuation can change the Text-to-Key character mapping.
+                // The preceding snapshot must also have shown this exact
+                // unconsumed word separately. Without that evidence, "cat"
+                // becoming "cats" could create a nonsense "s" caption.
+                word.Key.Length == word.Text.Length && word.Text.All(char.IsAsciiLetter) &&
+                _previous is { } previous && previous.Count > _consumed.Count &&
+                previous[_consumed.Count].Key == word.Key[remaining..])
+            {
+                // A source update joined a previously captioned short word
+                // with new lexical content ("ya" -> "yaushahidi"). Keep the
+                // consumed prefix in the ledger and expose its meaningful tail.
+                words[index] = new(word.Text[..remaining], word.Key[..remaining], false);
+                words.Insert(index + 1, new(word.Text[remaining..], word.Key[remaining..], word.SentenceEnd));
+                return index + 1;
+            }
+            else break;
+        }
         var common = 0;
         while (common < _consumed.Count && common < words.Count && _consumed[common].Key == words[common].Key) common++;
         if (common == _consumed.Count) return common;

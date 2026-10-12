@@ -6,6 +6,7 @@ namespace CapFast.Core;
 // Serializing transitions prevents an old start/stop from owning a newer session.
 public sealed class CaptionController
 {
+    private const int MaximumAutomaticRestarts = 3;
     private const string DisplayBacklogMessage = "Caption reading fell behind the speaker. Transcription paused to preserve queued text; let the captions finish, then use Start captions in Settings.";
     private readonly Func<CaptionSettings, ICaptionSession> _factory;
     private readonly Action<Action> _dispatch;
@@ -19,15 +20,24 @@ public sealed class CaptionController
     private int _inactivityEpoch;
     private ITimer? _musicTimer;
     private int _musicEpoch;
+    private ITimer? _recoveryTimer;
+    private int _recoveryEpoch;
+    private int _recoveryAttempts;
+    private DateTimeOffset? _liveSince;
+    private bool _acceptedCaptionSinceStart;
     private bool _musicExpired;
     private bool _wantLive;
     private bool _shutdown;
     private int _generation;
-    private bool _showFrench;
     private bool _hasCaptionText;
 
     public CaptionController(CaptionSettings settings, Func<CaptionSettings, ICaptionSession> factory, Action<Action> dispatch, TimeProvider? timeProvider = null)
-    { _timeProvider = timeProvider ?? TimeProvider.System; Settings = settings; _showFrench = settings.ShowFrench; _factory = factory; _dispatch = dispatch; if (settings.ConfigurationError is { } error) Errors.Add(error); }
+    { _timeProvider = timeProvider ?? TimeProvider.System; Settings = settings; _factory = factory; _dispatch = dispatch; if (settings.ConfigurationError is { } error) Errors.Add(error); }
+    public bool CanSetLanguageAssignment => State == CaptionState.Live && _session is ILanguageAssignmentSession;
+    public LanguageAssignment? LanguageAssignment { get; private set; }
+    public event Action<LanguageAssignment?>? LanguageAssignmentChanged;
+    public void ResetLanguageDetection() => (_session as ILanguageAssignmentSession)?.ResetLanguageDetection();
+    public void HintInputLanguage(string code) => (_session as ILanguageAssignmentSession)?.HintInputLanguage(code);
     public CaptionSettings Settings { get; }
     public CaptionState State { get; private set; } = CaptionState.Paused;
     public bool IsPaused => State == CaptionState.Paused;
@@ -40,23 +50,17 @@ public sealed class CaptionController
     public ErrorLog Events { get; } = new();
     public string? MissingConfiguration => Settings.IsLoadingConfiguration
         ? "Loading your local API configuration… You can open Settings while it loads."
-        : Settings.Provider == SpeechProvider.Google
-        ? string.IsNullOrWhiteSpace(Settings.GeminiKey) ? "Add your Google API key in Settings to start captions." : null
-        : string.IsNullOrWhiteSpace(Settings.AzureKey) || string.IsNullOrWhiteSpace(Settings.AzureRegion) ? "Add your Azure key and region in Settings to start captions." : null;
+        : string.IsNullOrWhiteSpace(Settings.GeminiKey) ? "Add your Google API key in Settings to start captions." : null;
     public event Action? Changed;
     public event Action<CaptionUpdate>? CaptionReceived;
     public event Action? CaptionsCleared;
     public event Action? CaptionsFading;
     public event Action? LocalConfigurationLoaded;
     public Func<bool>? CanAcceptCaptions { get; set; }
+    public Func<bool>? HasUnreadCaptions { get; set; }
     public void SettingsChanged()
     {
-        if (_showFrench != Settings.ShowFrench)
-        {
-            _showFrench = Settings.ShowFrench;
-            ClearCaptions();
-        }
-        else Changed?.Invoke();
+        Changed?.Invoke();
     }
     public void NotifyLocalConfigurationLoaded() { LocalConfigurationLoaded?.Invoke(); Changed?.Invoke(); }
     public void ClearCaptions()
@@ -77,7 +81,7 @@ public sealed class CaptionController
         _inactivityTimer?.Dispose(); _inactivityTimer = null;
     }
 
-    private void RestartInactivityCountdown()
+    private void RestartInactivityCountdown(TimeSpan? delay = null)
     {
         CancelInactivityCountdown();
         var epoch = _inactivityEpoch;
@@ -85,16 +89,24 @@ public sealed class CaptionController
         _inactivityTimer = _timeProvider.CreateTimer(_ => _dispatch(() =>
         {
             if (generation != _generation || epoch != _inactivityEpoch || !_wantLive) return;
-            FadeCaptions();
-        }), null, TimeSpan.FromSeconds(15), Timeout.InfiniteTimeSpan);
+            // Receipt silence is not reading silence: a long final or a burst
+            // can still have unread words while the next request is pending.
+            if (HasUnreadCaptions?.Invoke() == true)
+            {
+                RestartInactivityCountdown(TimeSpan.FromSeconds(1));
+                return;
+            }
+            FadeCaptions("No accepted caption for 15 seconds. Existing text faded; capture is still live.");
+        }), null, delay ?? TimeSpan.FromSeconds(15), Timeout.InfiniteTimeSpan);
     }
 
-    private void FadeCaptions()
+    private void FadeCaptions(string reason)
     {
         CancelInactivityCountdown();
         if (!_hasCaptionText) return;
         _hasCaptionText = false;
         _buffer.Clear(); CaptionUtteranceId = null;
+        Events.Add(reason);
         CaptionsFading?.Invoke(); Changed?.Invoke();
     }
 
@@ -117,7 +129,7 @@ public sealed class CaptionController
                 if (generation != _generation || epoch != _musicEpoch || !_wantLive || AudioActivity != AudioActivity.Music) return;
                 _musicExpired = true;
                 _musicTimer?.Dispose(); _musicTimer = null;
-                FadeCaptions();
+                FadeCaptions("Music continued for 7 seconds. Existing text faded; capture is still live.");
             }), null, TimeSpan.FromSeconds(7), Timeout.InfiniteTimeSpan);
         }
         Changed?.Invoke();
@@ -131,17 +143,20 @@ public sealed class CaptionController
         if (CaptionContentSafety.IsTechnicalOutput(update.Text) || CaptionContentSafety.IsTechnicalOutput(update.FrenchText))
         {
             Errors.Add("A provider returned technical text instead of a caption. The text was withheld from the audience.");
+            Events.Add("Rejected provider output. Listening for the next qualified speech.");
             if (CaptionUtteranceId == update.UtteranceId) ClearCaptions();
             return;
         }
         if (!update.IsFinal && (CaptionContentSafety.HoldPartial(update.Text) || CaptionContentSafety.HoldPartial(update.FrenchText))) return;
         // Filter every provider and every interim revision before either the
         // history preview or animated presentation can receive caption text.
-        update = update with { Text = EnglishCaptionFilter.Default.Filter(update.Text) };
+        update = update with {
+            Text = update.PrimaryLanguage is null or "en" ? EnglishCaptionFilter.Default.Filter(update.Text) : update.Text,
+            FrenchText = update.SecondaryLanguage == "en" && update.FrenchText is { } english ? EnglishCaptionFilter.Default.Filter(english) : update.FrenchText };
         _buffer.Apply(update);
         if (_buffer.LastAcceptedUpdate is not { } accepted) return;
         if (!string.IsNullOrWhiteSpace(accepted.Text) || !string.IsNullOrWhiteSpace(accepted.FrenchText))
-        { _hasCaptionText = true; RestartInactivityCountdown(); }
+        { _hasCaptionText = true; _acceptedCaptionSinceStart = true; RestartInactivityCountdown(); }
         CaptionUtteranceId = accepted.UtteranceId;
         CaptionReceived?.Invoke(accepted);
         Changed?.Invoke();
@@ -149,13 +164,14 @@ public sealed class CaptionController
     public Task ToggleAsync()
     {
         if (_shutdown) return Task.CompletedTask;
+        if (!_wantLive) _recoveryAttempts = 0;
         _wantLive = !_wantLive;
-        if (!_wantLive) { CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel(); State = CaptionState.Pausing; Changed?.Invoke(); }
+        if (!_wantLive) { CancelRecovery(); CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel(); State = CaptionState.Pausing; Changed?.Invoke(); }
         return ReconcileAsync();
     }
     public Task PauseAsync()
     {
-        _wantLive = false; CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel();
+        _wantLive = false; CancelRecovery(); _recoveryAttempts = 0; CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel();
         if (!IsPaused) { State = CaptionState.Pausing; Changed?.Invoke(); }
         return ReconcileAsync();
     }
@@ -172,6 +188,7 @@ public sealed class CaptionController
             if (MissingConfiguration is { } missing)
             { _wantLive = false; State = CaptionState.Paused; Status = missing; Changed?.Invoke(); return; }
             State = CaptionState.Starting; Status = "Connecting…";
+            _liveSince = null; _acceptedCaptionSinceStart = false;
             Events.Add("Connecting to the caption service."); Changed?.Invoke();
             var generation = ++_generation;
             using var starting = new CancellationTokenSource();
@@ -180,6 +197,13 @@ public sealed class CaptionController
             {
                 var session = _factory(Settings.Copy());
                 _session = session;
+                LanguageAssignment = null; LanguageAssignmentChanged?.Invoke(null);
+                if (session is ILanguageAssignmentSession languages)
+                    languages.LanguageAssignmentChanged += assignment => _dispatch(() =>
+                    {
+                        if (generation != _generation || !_wantLive || languages.LanguageAssignment?.Epoch != assignment?.Epoch) return;
+                        LanguageAssignment = assignment; LanguageAssignmentChanged?.Invoke(assignment); Changed?.Invoke();
+                    });
                 AudioActivity = AudioActivity.Idle;
                 HasAudioActivity = session is IAudioActivitySession;
                 if (session is IAudioActivitySession audioActivity)
@@ -196,7 +220,8 @@ public sealed class CaptionController
                     });
                 session.Caption += update => _dispatch(() =>
                 {
-                    if (generation == _generation && _wantLive) ApplyCaption(update);
+                    if (generation == _generation && _wantLive &&
+                        (session is not ILanguageAssignmentSession assignmentSession || assignmentSession.CanPresentCaption(update))) ApplyCaption(update);
                 });
                 session.Status += message => _dispatch(() =>
                 {
@@ -204,17 +229,29 @@ public sealed class CaptionController
                     Status = message;
                     if (message == "Google connection interrupted — reconnecting…")
                         Events.Add("Caption service connection is recovering.");
+                    else if (message == "Speech detected — connecting to Google…")
+                        Events.Add("Qualified speech detected; connecting to the caption service.");
                     else if (message == "Listening locally — Google reconnects when speech resumes.")
                         Events.Add("Google connection closed while idle; listening locally for speech.");
                     else if (message is "Google live — translating qualified speech." or "Gemini connected — starting the selected Mac audio input.")
                         Events.Add("Caption service connected.");
+                    else if (message == "No speech recognized. Check the audio input.")
+                        Events.Add("No speech recognized. Check the selected audio input.");
                     Changed?.Invoke();
                 });
-                session.Ended += message => _dispatch(() =>
-                { if (generation == _generation && _wantLive) { _ = PauseWithErrorAsync(message); } });
+                void SessionFailed(string message, bool operatorAction) => _dispatch(() =>
+                {
+                    if (generation != _generation || !_wantLive) return;
+                    Events.Add("Caption session stopped because of an issue.");
+                    _ = RecoverFromEndedAsync(generation, message, operatorAction);
+                });
+                if (session is ICaptionFailureSession classified)
+                    classified.Failure += failure => SessionFailed(failure.SafeMessage, failure.RequiresOperatorAction);
+                else session.Ended += message => SessionFailed(message, CaptionFailurePolicy.RequiresOperatorAction(message));
                 await session.StartAsync(starting.Token);
                 if (!_wantLive || generation != _generation) { await StopAsync(); return; }
                 State = CaptionState.Live; Status = "Live — use Pause captions in Settings";
+                _liveSince = _timeProvider.GetUtcNow();
                 Events.Add("Caption session is live.");
                 if (_hasCaptionText) RestartInactivityCountdown();
                 Changed?.Invoke();
@@ -229,8 +266,21 @@ public sealed class CaptionController
                     : "Could not start transcription. Check Settings diagnostics, service configuration, and connection.";
                 // A session-ended callback may already have recorded its precise error.
                 if (_wantLive) Errors.Add(message);
-                _wantLive = false; await StopAsync();
-                Status = message; Changed?.Invoke();
+                if (_wantLive) Events.Add("Caption session could not start.");
+                ResetRecoveryBudgetAfterHealthyRun();
+                var recover = _wantLive && !CaptionFailurePolicy.RequiresOperatorAction(message) &&
+                    _recoveryAttempts < MaximumAutomaticRestarts;
+                await StopAsync();
+                if (recover) ScheduleRecovery(message);
+                else
+                {
+                    _wantLive = false;
+                    Status = _recoveryAttempts >= MaximumAutomaticRestarts && !CaptionFailurePolicy.RequiresOperatorAction(message)
+                        ? $"Automatic recovery stopped after {MaximumAutomaticRestarts} attempts. {message} Check the connection, then use Start captions in Settings."
+                        : message;
+                    if (_recoveryAttempts >= MaximumAutomaticRestarts) Events.Add("Automatic recovery exhausted; operator action is needed.");
+                    Changed?.Invoke();
+                }
             }
             finally { if (ReferenceEquals(_starting, starting)) _starting = null; }
         }
@@ -241,6 +291,65 @@ public sealed class CaptionController
         Errors.Add(message);
         await PauseAsync();
         Status = message; Changed?.Invoke();
+    }
+    private void CancelRecovery()
+    {
+        ++_recoveryEpoch;
+        _recoveryTimer?.Dispose(); _recoveryTimer = null;
+    }
+    private void ResetRecoveryBudgetAfterHealthyRun()
+    {
+        // One accepted caption proves the restarted path worked; a sparse talk can
+        // then stay live through a long silence without consuming a lifetime retry budget.
+        if (_recoveryAttempts == 0 || !_acceptedCaptionSinceStart || _liveSince is not { } since ||
+            _timeProvider.GetUtcNow() - since < TimeSpan.FromMinutes(2)) return;
+        _recoveryAttempts = 0;
+        Events.Add("Previous recovery attempts cleared after two minutes live with an accepted caption.");
+    }
+    private void ScheduleRecovery(string message)
+    {
+        if (!_wantLive || _shutdown) return;
+        CancelRecovery();
+        var attempt = ++_recoveryAttempts;
+        var delay = TimeSpan.FromSeconds(1 << (attempt - 1));
+        var epoch = _recoveryEpoch;
+        State = CaptionState.Starting;
+        Status = $"Automatic recovery {attempt}/{MaximumAutomaticRestarts} in {delay.TotalSeconds:0} seconds…";
+        Events.Add($"Caption session restart scheduled (attempt {attempt}/{MaximumAutomaticRestarts}).");
+        Changed?.Invoke();
+        _recoveryTimer = _timeProvider.CreateTimer(_ => _dispatch(() =>
+        {
+            if (epoch != _recoveryEpoch || !_wantLive || _shutdown) return;
+            _recoveryTimer?.Dispose(); _recoveryTimer = null;
+            Events.Add($"Restarting caption session (attempt {attempt}/{MaximumAutomaticRestarts}).");
+            _ = ReconcileAsync();
+        }), null, delay, Timeout.InfiniteTimeSpan);
+    }
+    private async Task RecoverFromEndedAsync(int generation, string message, bool operatorAction)
+    {
+        await _transition.WaitAsync();
+        try
+        {
+            if (generation != _generation || !_wantLive || _shutdown) return;
+            Errors.Add(message);
+            ResetRecoveryBudgetAfterHealthyRun();
+            var recover = !operatorAction &&
+                _recoveryAttempts < MaximumAutomaticRestarts;
+            await StopAsync();
+            if (recover) ScheduleRecovery(message);
+            else
+            {
+                _wantLive = false;
+                Status = _recoveryAttempts >= MaximumAutomaticRestarts && !operatorAction
+                    ? $"Automatic recovery stopped after {MaximumAutomaticRestarts} attempts. {message} Check the connection, then use Start captions in Settings."
+                    : message;
+                Events.Add(_recoveryAttempts >= MaximumAutomaticRestarts && !operatorAction
+                    ? "Automatic recovery exhausted; operator action is needed."
+                    : "Caption session stopped; operator action is needed.");
+                Changed?.Invoke();
+            }
+        }
+        finally { _transition.Release(); }
     }
     private async Task StopAsync()
     {
@@ -270,6 +379,7 @@ public sealed class CaptionController
             if (!DisplayReady()) return;
             _demo = new CancellationTokenSource(); token = _demo.Token;
             generation = ++_generation;
+            { LanguageAssignment = new("sw", "en", "fr", -generation); LanguageAssignmentChanged?.Invoke(LanguageAssignment); }
             _wantLive = true; State = CaptionState.Live; Status = "Caption demo — use Pause captions in Settings"; Changed?.Invoke();
         }
         finally { _transition.Release(); }
@@ -306,7 +416,10 @@ public sealed class CaptionController
                 await Task.Delay(900, token);
                 if (generation != _generation) return;
                 var update = new CaptionUpdate($"demo-{generation}-{frames[i].Phrase}", frames[i].Text, frames[i].Final,
-                    Settings.ShowFrench ? frenchFrames[i] : null);
+                    frenchFrames[i],
+                    SourceLanguage: "sw",
+                    PrimaryLanguage: "en",
+                    SecondaryLanguage: "fr");
                 ApplyCaption(update);
             }
         }

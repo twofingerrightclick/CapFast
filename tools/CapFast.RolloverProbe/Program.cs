@@ -61,7 +61,7 @@ internal static class Program
             var notices = new List<string>();
             var captionSessions = new HashSet<string>();
             string? failure = null;
-            await using var session = new GeminiCaptionSession(key, null, GoogleCaptionMode.TwoStage, () =>
+            await using var session = new GeminiCaptionSession(key, null, () =>
             {
                 Interlocked.Increment(ref sockets);
                 return new CountingTransport(new WebSocketLiveTransport(key), () =>

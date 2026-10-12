@@ -1,0 +1,148 @@
+{
+  "sourceVideo": "2026-04-1050-clark-g-gilbert-360p-swa.mp4",
+  "sourceDurationSeconds": 787.02,
+  "fullAudio": "talk.mp3",
+  "clips": [
+    {
+      "id": "early",
+      "localAudio": "early-30s.wav",
+      "audioSeconds": 30,
+      "startSeconds": 30,
+      "sourceText": "",
+      "referenceText": "",
+      "levels": {
+        "peak": 0.6120041608810425,
+        "rms": 0.10701139693933984,
+        "peakDbFS": -4.264912503443883,
+        "rmsDbFS": -19.41139933147644,
+        "sampleCount": 480000
+      }
+    },
+    {
+      "id": "middle",
+      "localAudio": "middle-30s.wav",
+      "audioSeconds": 30,
+      "startSeconds": 393,
+      "sourceText": "",
+      "referenceText": "",
+      "levels": {
+        "peak": 0.5946401357650757,
+        "rms": 0.1097443870556186,
+        "peakDbFS": -4.514915620985751,
+        "rmsDbFS": -19.192353655540803,
+        "sampleCount": 480000
+      }
+    },
+    {
+      "id": "late",
+      "localAudio": "late-30s.wav",
+      "audioSeconds": 30,
+      "startSeconds": 697,
+      "sourceText": "",
+      "referenceText": "",
+      "levels": {
+        "peak": 0.6012409925460815,
+        "rms": 0.10554329979072427,
+        "peakDbFS": -4.419028338493979,
+        "rmsDbFS": -19.531386636283784,
+        "sampleCount": 480000
+      }
+    }
+  ],
+  "notes": [
+    "Offsets selected before recognition: early at 30s, midpoint, and 90s before end.",
+    "WAV clips decode directly from original video; MP3 is for listening only.",
+    "Mono 16kHz float32 WAV, no gain normalization or noise processing.",
+    "Provided Swahili transcript is untimed and not aligned to clips.",
+    "No English gold reference was supplied; empty referenceText must not be scored as accuracy."
+  ],
+  "ffmpegVersion": "ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers",
+  "commands": [
+    [
+      "/Users/austen/Documents/Repo/CapFast/artifacts/pythonmedia/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-n",
+      "-i",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/2026-04-1050-clark-g-gilbert-360p-swa.mp4",
+      "-map",
+      "0:a:0",
+      "-vn",
+      "-c:a",
+      "libmp3lame",
+      "-q:a",
+      "2",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/extracted/talk.mp3"
+    ],
+    [
+      "/Users/austen/Documents/Repo/CapFast/artifacts/pythonmedia/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-n",
+      "-i",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/2026-04-1050-clark-g-gilbert-360p-swa.mp4",
+      "-ss",
+      "30",
+      "-t",
+      "30",
+      "-map",
+      "0:a:0",
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_f32le",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/extracted/early-30s.wav"
+    ],
+    [
+      "/Users/austen/Documents/Repo/CapFast/artifacts/pythonmedia/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-n",
+      "-i",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/2026-04-1050-clark-g-gilbert-360p-swa.mp4",
+      "-ss",
+      "393",
+      "-t",
+      "30",
+      "-map",
+      "0:a:0",
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_f32le",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/extracted/middle-30s.wav"
+    ],
+    [
+      "/Users/austen/Documents/Repo/CapFast/artifacts/pythonmedia/imageio_ffmpeg/binaries/ffmpeg-macos-aarch64-v7.1",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-n",
+      "-i",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/2026-04-1050-clark-g-gilbert-360p-swa.mp4",
+      "-ss",
+      "697",
+      "-t",
+      "30",
+      "-map",
+      "0:a:0",
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_f32le",
+      "/Users/austen/Documents/Repo/CapFast/sampleTalk/extracted/late-30s.wav"
+    ]
+  ]
+}

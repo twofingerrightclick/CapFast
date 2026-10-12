@@ -1,7 +1,6 @@
 namespace CapFast.Core;
 
 public enum CaptionState { Paused, Starting, Live, Pausing }
-public enum SpeechProvider { Google, Azure }
 public sealed record AudioInput(string Id, string Name);
 
 public sealed class CaptionSettings
@@ -13,33 +12,20 @@ public sealed class CaptionSettings
         ConfigurationPath = local.Path;
         ConfigurationError = local.Error;
         GeminiKey = local.GoogleKey;
-        AzureKey = local.Get("AZURE_SPEECH_KEY");
-        AzureRegion = local.Get("AZURE_SPEECH_REGION");
     }
     public string ConfigurationPath { get; private set; }
     public string? ConfigurationError { get; set; }
     public bool IsLoadingConfiguration { get; set; }
-    public void ApplyLocalConfiguration(LocalConfiguration local, string originalGoogle, string originalAzure, string originalRegion)
+    public void ApplyLocalConfiguration(LocalConfiguration local, string originalGoogle)
     {
         ConfigurationPath = local.Path;
         ConfigurationError = local.Error;
         if (GeminiKey == originalGoogle) GeminiKey = local.GoogleKey;
-        if (AzureKey == originalAzure) AzureKey = local.Get("AZURE_SPEECH_KEY");
-        if (AzureRegion == originalRegion) AzureRegion = local.Get("AZURE_SPEECH_REGION");
         IsLoadingConfiguration = false;
     }
-    public SpeechProvider Provider { get; set; } = SpeechProvider.Google;
     public AppAppearance Appearance { get; set; } = AppAppearance.Dark;
-    public GoogleCaptionMode GoogleMode { get; set; } = GoogleCaptionMode.TwoStage;
     public bool RejectMusic { get; set; }
-    public bool FrenchEnabled { get; set; }
-    public bool ShowFrench => Provider == SpeechProvider.Google && FrenchEnabled;
-    public GoogleCaptionMode EffectiveGoogleMode => ShowFrench ? GoogleCaptionMode.TwoStage : GoogleMode;
     public string GeminiKey { get; set; } = "";
-    public string AzureKey { get; set; } = "";
-    public string AzureRegion { get; set; } = "";
-    public string Locale { get; set; } = "sw-KE";
-    public bool Stabilize { get; set; } = true;
     public double FontSize { get; set; } = 48;
     public int ReadingWordsPerMinute { get; set; } = 180;
     public string AudioDeviceId { get; set; } = "";

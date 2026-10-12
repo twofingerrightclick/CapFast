@@ -16,31 +16,30 @@ public sealed class SettingsWindow : Window
     private readonly CaptionController _controller;
     private readonly CheckBox _lightMode = new() { Content = "Light mode" };
     private readonly StackPanel _configuration;
-    private readonly ComboBox _provider = new() { ItemsSource = new[] { "Google Gemini", "Azure Speech" } };
-    private readonly TextBox _gemini = new() { PasswordChar = '●' };
-    private readonly ComboBox _googleMode = new() { ItemsSource = new[]
-        { "Swahili transcription → English translation", "Live Translate (comparison)" } };
-    private readonly CheckBox _french = new() { Content = "Add French captions" };
+    private readonly TextBox _gemini = new() { IsVisible = false, PasswordChar = '●' };
     private readonly CheckBox _rejectMusic = new() { Content = "Reject detected music and singing" };
     private readonly TextBlock _googleDescription = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 };
-    private readonly TextBox _azure = new() { PasswordChar = '●' };
-    private readonly TextBox _region = new();
-    private readonly ComboBox _locale = new() { ItemsSource = new[] { "sw-KE", "sw-TZ" } };
-    private readonly CheckBox _stabilize = new() { Content = "Stabilize provisional translations" };
     private readonly Slider _size = new() { Minimum = 28, Maximum = 72 };
     private readonly Slider _readingSpeed = new() { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true };
     private readonly TextBlock _readingLabel = new() { FontWeight = FontWeight.Medium };
     private readonly SelectableTextBlock _configurationPath = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .75 };
     private readonly TextBlock _notice = new() { TextWrapping = TextWrapping.Wrap, Opacity = .75 };
     private readonly StackPanel _googlePanel;
-    private readonly StackPanel _azurePanel;
-    private readonly Button _demo = new() { Content = "Preview sample captions" };
-    private readonly Button _pause = new() { Content = "Start captions" };
+    private readonly Button _demo = CommandRowButton("Preview sample captions");
+    private readonly Button _pause = new() { Content = "▶ Start captions", HorizontalAlignment = HorizontalAlignment.Stretch,
+        HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
+        MinHeight = 72 };
+    private readonly Button _resetLanguages = CommandRowButton("Reset output languages");
+    private readonly Grid _commandRow = new() { ColumnDefinitions = new ColumnDefinitions("*,*,*"), ColumnSpacing = 8 };
+    private readonly StackPanel _languageConsole = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
+    private readonly Dictionary<string, Button> _languageButtons = new();
+    private readonly TextBlock _languageStatus = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
     private readonly Button _clear = new() { Content = "Clear captions" };
-    private readonly Button _fullscreen = new() { Content = "Toggle display fullscreen" };
+    private readonly Button _fullscreen = CommandRowButton("Toggle display fullscreen");
     private readonly ComboBox _audio = new() { MinWidth = 250 };
     private readonly Button _refreshAudio = new() { Content = "Refresh inputs" };
     private readonly TextBlock _audioAvailability = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+    private readonly DispatcherTimer _preferencesSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(300) };
     private readonly TextBlock _activity = new() { FontSize = 25, FontWeight = FontWeight.Bold, Width = 40,
         Foreground = new SolidColorBrush(Color.Parse("#59B8FF")) };
     private readonly TextBlock _sessionStatus = new() { TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
@@ -49,6 +48,7 @@ public sealed class SettingsWindow : Window
     private readonly Button _reloadFile = new() { Content = "Reload file" };
     private readonly Button _microphone = new() { Content = "Check microphone permission" };
     private readonly TextBlock _diagnostic = new() { TextWrapping = TextWrapping.Wrap, FontSize = 13 };
+    private readonly TextBlock _diagnosticState = new() { TextWrapping = TextWrapping.Wrap, FontSize = 13 };
     private readonly TextBlock _latestIssue = new() { TextWrapping = TextWrapping.Wrap, FontWeight = FontWeight.Medium };
     private readonly StackPanel _diagnosticHistory = new() { Spacing = 7 };
     private bool _checkingMicrophone;
@@ -56,6 +56,7 @@ public sealed class SettingsWindow : Window
     private bool _listingAudio;
     private bool _audioAvailable = true;
     private bool _loading;
+    private bool _preferencesDirty;
     private bool _closed;
     private bool _reloadingFile;
     private Task<LocalConfiguration>? _reloadRead;
@@ -72,86 +73,114 @@ public sealed class SettingsWindow : Window
         Title = "CapFast — Settings";
         Width = 600; Height = 760; MinWidth = 440; MinHeight = 480;
         _lightMode.IsChecked = controller.Settings.Appearance == AppAppearance.Light;
-        _provider.SelectedIndex = controller.Settings.Provider == SpeechProvider.Google ? 0 : 1;
         _gemini.Text = controller.Settings.GeminiKey;
-        _googleMode.SelectedIndex = controller.Settings.GoogleMode == GoogleCaptionMode.TwoStage ? 0 : 1;
-        _french.IsChecked = controller.Settings.FrenchEnabled;
         _rejectMusic.IsChecked = controller.Settings.RejectMusic;
-        _azure.Text = controller.Settings.AzureKey;
-        _region.Text = controller.Settings.AzureRegion;
-        _locale.SelectedItem = controller.Settings.Locale;
-        _stabilize.IsChecked = controller.Settings.Stabilize;
         _size.Value = controller.Settings.FontSize;
         _configurationPath.Text = controller.Settings.ConfigurationPath;
         _readingSpeed.Value = controller.Settings.ReadingWordsPerMinute;
         _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
-        _googlePanel = new StackPanel { Spacing = 8, Children = { Label("Google caption mode"), _googleMode,
-            _french, _googleDescription, _rejectMusic,
+        var editGoogleKey = new Button { Content = "Edit Google API key" };
+        editGoogleKey.Click += (_, _) => _gemini.IsVisible = !_gemini.IsVisible;
+        _googlePanel = new StackPanel { Spacing = 8, Children = {
+            Label("Automatic transcription → two output languages"), _googleDescription, _rejectMusic,
             new TextBlock { Text = "Off by default. Music-labeled audio can be captioned; pause manually when music plays. Change this while paused.",
                 TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
-            Label("Gemini API key"), _gemini } };
-        _azurePanel = new StackPanel { Spacing = 8, Children = { Label("Azure Speech key"), _azure,
-            Label("Azure region"), _region, Label("Swahili locale"), _locale, _stabilize } };
-        _configuration = new StackPanel { Spacing = 14, Children = { Label("Translation service"), _provider,
-            _googlePanel, _azurePanel } };
+            Label("Gemini API key"), editGoogleKey, _gemini } };
+        _configuration = new StackPanel { Spacing = 14, Children = { _googlePanel } };
         var close = new Button { Content = "Done", HorizontalAlignment = HorizontalAlignment.Right };
         close.Click += (_, _) => Close();
+        foreach (var code in new[] { "en", "sw", "fr" })
+        {
+            var language = code;
+            var button = new Button { MinWidth = 110, Padding = new Thickness(10, 8), HorizontalContentAlignment = HorizontalAlignment.Left };
+            button.Click += (_, _) => controller.HintInputLanguage(button.Tag as string ?? language);
+            _languageButtons.Add(code, button); _languageConsole.Children.Add(button);
+        }
+        _resetLanguages.Click += (_, _) => controller.ResetLanguageDetection();
         _clear.Click += (_, _) => controller.ClearCaptions();
         _fullscreen.Click += (_, _) => ToggleDisplayFullscreen?.Invoke();
         _demo.Click += async (_, _) => { await controller.RunDemoAsync(); };
         _pause.Click += async (_, _) =>
         {
-            if (controller.IsPaused) await controller.ToggleAsync();
+            if (_listingAudio) return;
+            if (controller.IsPaused)
+            {
+                // Capture the visible choice before starting disables the selector.
+                if (_audio.SelectedItem is AudioInput selected)
+                {
+                    if (controller.Settings.AudioDeviceId != selected.Id)
+                    {
+                        controller.Settings.AudioDeviceId = selected.Id;
+                        SchedulePreferencesSave();
+                        SavePreferences();
+                    }
+                }
+                await controller.ToggleAsync();
+            }
             else await controller.PauseAsync();
         };
         _openFile.Click += async (_, _) => await OpenConfigurationFileAsync();
         _reloadFile.Click += async (_, _) => await ReloadConfigurationAsync();
         _microphone.Click += async (_, _) => await CheckMicrophoneAsync();
         _audio.ItemTemplate = new FuncDataTemplate<AudioInput>((input, _) => new TextBlock { Text = input?.Name });
-        _audio.ItemsSource = new[] { new AudioInput("", "System default") };
-        _audio.SelectedIndex = 0;
+        var initialInputs = new List<AudioInput> { new("", "System default") };
+        if (!string.IsNullOrEmpty(controller.Settings.AudioDeviceId))
+            initialInputs.Add(new(controller.Settings.AudioDeviceId, "Saved input — checking availability"));
+        _audio.ItemsSource = initialInputs;
+        _audio.SelectedIndex = initialInputs.Count - 1;
         _audio.SelectionChanged += (_, _) =>
         {
-            if (_updatingAudio || !_controller.IsPaused || _audio.SelectedItem is not AudioInput input) return;
+            if (_updatingAudio || _audio.SelectedItem is not AudioInput input) return;
+            if (!_controller.IsPaused)
+            {
+                RestoreAudioSelection();
+                return;
+            }
             _controller.Settings.AudioDeviceId = input.Id;
             _controller.SettingsChanged();
+            SchedulePreferencesSave();
+            SavePreferences();
             _audioAvailable = !input.Name.Contains("unavailable", StringComparison.OrdinalIgnoreCase);
             UpdateAudioAvailability();
         };
         _refreshAudio.Click += async (_, _) => await RefreshAudioAsync();
+        _commandRow.Children.Add(PlaceInColumn(_resetLanguages, 0));
+        _commandRow.Children.Add(PlaceInColumn(_demo, 1));
+        _commandRow.Children.Add(PlaceInColumn(_fullscreen, 2));
         var commands = new StackPanel { Spacing = 10, Children =
         {
             Label("Commands"),
-            new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), Children =
+            new Grid { MinHeight = 96, ColumnDefinitions = new ColumnDefinitions("Auto,*"), Children =
             {
                 _activity,
                 PlaceInColumn(_sessionStatus, 1)
             } },
-            _pause, _demo, _clear, _fullscreen, _microphone
+            _languageConsole, _languageStatus, _pause, _clear, _commandRow
         } };
         var clearHistory = new Button { Content = "Clear diagnostic history", HorizontalAlignment = HorizontalAlignment.Right };
         clearHistory.Click += (_, _) => { _controller.Errors.Clear(); _controller.Events.Clear(); };
         var diagnostics = new StackPanel { Spacing = 8, Children =
         {
             Label("Diagnostics"),
+            _diagnosticState,
             _latestIssue,
             _diagnostic,
             new ScrollViewer { Height = 155, Content = _diagnosticHistory },
             clearHistory
         } };
         Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(28), Spacing = 18,
-            Children = { new TextBlock { Text = "Settings", FontSize = 28, FontWeight = FontWeight.SemiBold },
-                commands, diagnostics,
+            Children = { commands, diagnostics,
+                Label("Caption size"), _size,
                 new Separator(), Label("Audio input"),
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _audio, _refreshAudio } },
-                _audioAvailability,
+                _audioAvailability, _microphone,
                 Label("Appearance"), _lightMode,
                 _notice, _configuration,
                 new TextBlock { Text = "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 _configurationPath,
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } },
-                new Separator(), Label("Caption size"), _size,
+                new Separator(),
                 _readingLabel, _readingSpeed,
                 new TextBlock { Text = "Text fills the window. This pace controls how soon older text can leave; a slower pace may delay captions behind the speaker.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
@@ -162,20 +191,14 @@ public sealed class SettingsWindow : Window
             controller.Settings.Appearance = _lightMode.IsChecked == true ? AppAppearance.Light : AppAppearance.Dark;
             controller.SettingsChanged();
         };
-        _provider.SelectionChanged += (_, _) => Save();
-        _googleMode.SelectionChanged += (_, _) => Save();
-        _french.IsCheckedChanged += (_, _) => Save();
         _rejectMusic.IsCheckedChanged += (_, _) => Save();
         _gemini.TextChanged += (_, _) => Save();
-        _azure.TextChanged += (_, _) => Save();
-        _region.TextChanged += (_, _) => Save();
-        _locale.SelectionChanged += (_, _) => Save();
-        _stabilize.IsCheckedChanged += (_, _) => Save();
         _size.PropertyChanged += (_, e) =>
         {
             if (e.Property != Slider.ValueProperty) return;
             controller.Settings.FontSize = _size.Value;
             controller.SettingsChanged();
+            SchedulePreferencesSave();
         };
         _readingSpeed.PropertyChanged += (_, e) =>
         {
@@ -183,15 +206,23 @@ public sealed class SettingsWindow : Window
             controller.Settings.ReadingWordsPerMinute = (int)Math.Round(_readingSpeed.Value);
             _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
             controller.SettingsChanged();
+            SchedulePreferencesSave();
         };
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
         controller.Changed += Refresh;
         controller.LocalConfigurationLoaded += RefreshLocalConfiguration;
         controller.Errors.Changed += RefreshDiagnostics;
         controller.Events.Changed += RefreshDiagnostics;
+        _preferencesSaveTimer.Tick += (_, _) =>
+        {
+            _preferencesSaveTimer.Stop();
+            SavePreferences();
+        };
         Opened += async (_, _) => await RefreshAudioAsync();
         Closed += (_, _) =>
         {
+            _preferencesSaveTimer.Stop();
+            SavePreferences();
             _closed = true;
             controller.Changed -= Refresh;
             controller.LocalConfigurationLoaded -= RefreshLocalConfiguration;
@@ -209,8 +240,6 @@ public sealed class SettingsWindow : Window
         if (_closed) return;
         _loading = true;
         _gemini.Text = _controller.Settings.GeminiKey;
-        _azure.Text = _controller.Settings.AzureKey;
-        _region.Text = _controller.Settings.AzureRegion;
         _configurationPath.Text = _controller.Settings.ConfigurationPath;
         _diagnostic.Text = _controller.Settings.ConfigurationError ?? "";
         _loading = false;
@@ -268,8 +297,6 @@ public sealed class SettingsWindow : Window
         _reloadingFile = true;
         var settings = _controller.Settings;
         var originalGoogle = settings.GeminiKey;
-        var originalAzure = settings.AzureKey;
-        var originalRegion = settings.AzureRegion;
         var path = settings.ConfigurationPath;
         Refresh();
         _diagnostic.Text = "Reading local API configuration…";
@@ -282,7 +309,7 @@ public sealed class SettingsWindow : Window
             if (_closed) return;
             if (local.Error is { } error)
             { _diagnostic.Text = error; _controller.Errors.Add(error); return; }
-            settings.ApplyLocalConfiguration(local, originalGoogle, originalAzure, originalRegion);
+            settings.ApplyLocalConfiguration(local, originalGoogle);
             _controller.NotifyLocalConfigurationLoaded();
             _diagnostic.Text = "Local API configuration reloaded.";
         }
@@ -334,12 +361,26 @@ public sealed class SettingsWindow : Window
     }
 
     private static TextBlock Label(string text) => new() { Text = text, FontWeight = FontWeight.Medium };
+    private static Button CommandRowButton(string label)
+    {
+        var button = new Button
+        {
+            Content = new TextBlock { Text = label, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap },
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            MinHeight = 56,
+            Padding = new Thickness(8)
+        };
+        Avalonia.Automation.AutomationProperties.SetName(button, label);
+        return button;
+    }
     private void RefreshDiagnostics()
     {
         if (_closed) return;
         if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(RefreshDiagnostics); return; }
         var issues = _controller.Errors.Entries;
-        _latestIssue.Text = issues.Count == 0 ? "Latest issue: none" : $"Latest issue: {issues[^1].Message}";
+        _latestIssue.Text = issues.Count == 0 ? "Recorded issues: none" : $"Most recent recorded issue: {issues[^1].Message}";
         var entries = issues.Select(entry => (entry.Time, entry.Message, Kind: "Issue"))
             .Concat(_controller.Events.Entries.Select(entry => (entry.Time, entry.Message, Kind: "Event")))
             .OrderByDescending(entry => entry.Time).Take(100).ToArray();
@@ -357,6 +398,7 @@ public sealed class SettingsWindow : Window
         if (_listingAudio) return;
         _listingAudio = true;
         _refreshAudio.IsEnabled = false;
+        Refresh();
         try
         {
             var inputs = (await MacAudioInputs.ListAsync()).ToList();
@@ -395,54 +437,90 @@ public sealed class SettingsWindow : Window
             ? $"Selected: {selected?.Name ?? "System default"} · Available"
             : "Selected input unavailable. Pause captions and choose another input.";
     }
+    private void SchedulePreferencesSave()
+    {
+        _preferencesDirty = true;
+        _preferencesSaveTimer.Stop();
+        _preferencesSaveTimer.Start();
+    }
+    private void SavePreferences()
+    {
+        _preferencesSaveTimer.Stop();
+        if (!_preferencesDirty) return;
+        try
+        {
+            CaptionPreferences.Save(_controller.Settings);
+            _preferencesDirty = false;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { _controller.Errors.Add("Could not save audio and caption preferences. Check access to the CapFast application data folder."); }
+    }
+    private void RestoreAudioSelection()
+    {
+        var selected = _audio.ItemsSource?.OfType<AudioInput>()
+            .FirstOrDefault(input => input.Id == _controller.Settings.AudioDeviceId);
+        if (selected is null || ReferenceEquals(_audio.SelectedItem, selected)) return;
+        _updatingAudio = true;
+        try { _audio.SelectedItem = selected; }
+        finally { _updatingAudio = false; }
+        UpdateAudioAvailability();
+    }
     private static T PlaceInColumn<T>(T control, int column) where T : Control
     { Grid.SetColumn(control, column); return control; }
     private void Save()
     {
         if (_loading || !_controller.IsPaused) return;
         var settings = _controller.Settings;
-        if (_french.IsChecked == true && _googleMode.SelectedIndex != 0)
-        {
-            _loading = true;
-            _googleMode.SelectedIndex = 0;
-            _loading = false;
-        }
-        settings.Provider = _provider.SelectedIndex == 0 ? SpeechProvider.Google : SpeechProvider.Azure;
-        settings.GoogleMode = _googleMode.SelectedIndex == 0 ? GoogleCaptionMode.TwoStage : GoogleCaptionMode.LiveTranslate;
-        settings.FrenchEnabled = _french.IsChecked == true;
         settings.RejectMusic = _rejectMusic.IsChecked == true;
         settings.GeminiKey = _gemini.Text ?? "";
-        settings.AzureKey = _azure.Text ?? "";
-        settings.AzureRegion = _region.Text ?? "";
-        settings.Locale = _locale.SelectedItem as string ?? "sw-KE";
-        settings.Stabilize = _stabilize.IsChecked == true;
         _controller.SettingsChanged();
     }
     private void Refresh()
     {
         if (!Dispatcher.UIThread.CheckAccess()) { Dispatcher.UIThread.Post(Refresh); return; }
         _configuration.IsEnabled = _controller.IsPaused;
-        _pause.Content = _controller.IsPaused ? "Start captions"
-            : _controller.State == CaptionState.Pausing ? "Pausing…" : "Pause captions";
-        _pause.IsEnabled = _controller.State != CaptionState.Pausing;
+        _pause.Content = _controller.IsPaused ? "▶ Start captions"
+            : _controller.State == CaptionState.Pausing ? "⏸ Pausing…" : "⏸ Pause captions";
+        Avalonia.Automation.AutomationProperties.SetName(_pause,
+            _controller.IsPaused ? "Start captions" : _controller.State == CaptionState.Pausing ? "Pausing captions" : "Pause captions");
+        _pause.IsEnabled = _controller.State != CaptionState.Pausing && !_listingAudio;
         _demo.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _audio.IsEnabled = _controller.IsPaused && !_listingAudio;
+        if (!_controller.IsPaused && !_updatingAudio) RestoreAudioSelection();
         _activity.Text = _controller.AudioActivity == AudioActivity.Music && _controller.State == CaptionState.Live ? "♫"
-            : _controller.State == CaptionState.Live ? "•••" : "·";
+            : _controller.AudioActivity == AudioActivity.Speech && _controller.State == CaptionState.Live ? "•••" : "·";
         Avalonia.Automation.AutomationProperties.SetName(_activity,
             _controller.AudioActivity == AudioActivity.Music && _controller.State == CaptionState.Live ? "Music detected"
-            : _controller.State == CaptionState.Live ? "Transcription running" : "Transcription paused");
-        _sessionStatus.Text = _controller.Status;
+            : _controller.State == CaptionState.Live ? (_controller.AudioActivity == AudioActivity.Speech ? "Speech detected" : "Listening — no speech") : "Transcription paused");
+        _sessionStatus.Text = _controller.State == CaptionState.Live
+            ? $"{LanguageSurfaceRouting.Status(_controller.LanguageAssignment)} · {_controller.Status}" : _controller.Status;
+        _diagnosticState.Text = CommandCenterStatus.Describe(_controller.State, _controller.AudioActivity, _controller.Status);
+        var assignment = _controller.LanguageAssignment;
+        _resetLanguages.IsEnabled = _controller.CanSetLanguageAssignment;
+        _languageStatus.Text = assignment is null ? "Detecting · Auto checks each speech segment. Click a language to hint the next utterance."
+            : $"Mostly {LanguageSurfaceRouting.Label(assignment.Input)} · Each phrase uses its own translation direction. Click a language to hint the next utterance.";
+        var consoleLanguages = assignment is null ? new[] { "en", "sw", "fr" }
+            : new[] { assignment.Input, assignment.Primary, assignment.Secondary };
+        var consoleIndex = 0;
+        foreach (var pair in _languageButtons)
+        {
+            var code = consoleLanguages[consoleIndex++];
+            pair.Value.Tag = code;
+            var input = assignment?.Input == code;
+            var output = assignment is not null && (assignment.Primary == code || assignment.Secondary == code);
+            var role = input ? "MAIN INPUT" : output ? "OUTPUT" : "DETECTING";
+            pair.Value.Content = $"{LanguageSurfaceRouting.Label(code)}\n{role}";
+            pair.Value.Foreground = new SolidColorBrush(Color.Parse(input ? "#FF7979" : output ? "#73DFA1" : "#A6A6A6"));
+            pair.Value.BorderBrush = pair.Value.Foreground;
+            pair.Value.IsEnabled = _controller.CanSetLanguageAssignment;
+            Avalonia.Automation.AutomationProperties.SetName(pair.Value, $"{LanguageSurfaceRouting.Label(code)} {role.ToLowerInvariant()} — hint input language");
+        }
         _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile;
         _microphone.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _microphone.IsVisible = OperatingSystem.IsMacOS();
-        _googlePanel.IsVisible = _provider.SelectedIndex == 0;
-        _azurePanel.IsVisible = !_googlePanel.IsVisible;
-        _googleMode.IsEnabled = _french.IsChecked != true;
-        _googleDescription.Text = _french.IsChecked == true
-            ? "Swahili speech is transcribed once and translated into English and French. English appears on the left and French on the right. This uses Google TwoStage and adds a Flash translation request for each fragment. Changing the caption languages clears existing captions."
-            : "Two-stage mode translates stable Swahili fragments into English.";
-        _notice.Text = _controller.IsPaused ? "Configure the service, then use Start captions above."
-            : "Transcription is running. Pause to change the service or credentials.";
+        _googleDescription.Text = "Every run starts in Auto. Each speech fragment is translated in its own language; the input indicator follows sustained language changes. English and Swahili captions share the left column; French stays on the right. Pending captions stay queued during slow requests. If translation cannot recover, capture pauses with an issue. Five seconds without speech returns to Detecting. A language click hints the next utterance.";
+        _notice.Text = _controller.IsPaused ? "Configure your Google key, then use Start captions above."
+            : _controller.State == CaptionState.Live ? "Transcription is running. Pause to change your Google credentials."
+            : "Caption service is connecting. Pause to change your Google credentials.";
     }
 }

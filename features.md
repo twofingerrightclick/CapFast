@@ -26,6 +26,8 @@ When there is a Gap in audio speech input, then create a double new line. Gap mu
 
 ## FEAT-004 — Recover when captions stop because of an issue
 
+**Status:** Implemented with bounded controller restarts; live provider validation pending.
+
 Automatically resume captioning after recoverable failures, with bounded retries and a visible recovery state. Preserve operator intent: a manual Pause stays paused. Show a clear issue and required action when recovery is not possible, such as invalid credentials or exhausted quota. Ensure the caption stream and command controls remain usable after recovery.
 
 **Related:** [CAP-002](bugs.md#cap-002--recoverable-failures-pause-captions-until-manually-restarted), [CAP-003](bugs.md#cap-003--a-pause-or-gap-can-be-hard-to-diagnose-from-the-caption-window).

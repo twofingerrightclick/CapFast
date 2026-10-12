@@ -15,6 +15,11 @@ public static class CaptionContentSafety
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         var value = text.TrimStart();
+        // These are private request fields, never audience-facing translation.
+        // Check the entire response: model commentary can follow ordinary prose.
+        if (value.Contains("previousSource", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("sourceToTranslate", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("sourceLanguage", StringComparison.OrdinalIgnoreCase)) return true;
         if (LooksLikeStructuredResponse(value) || value.StartsWith("```", StringComparison.Ordinal)) return true;
         foreach (var prefix in DiagnosticPrefixes)
             if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;

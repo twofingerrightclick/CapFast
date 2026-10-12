@@ -22,7 +22,7 @@ public sealed class LocalConfiguration
                 var equals = trimmed.IndexOf('=');
                 if (equals <= 0) continue;
                 var name = trimmed[..equals].Trim();
-                if (name is not ("GEMINI_API_KEY" or "GOOGLE_API_KEY" or "AZURE_SPEECH_KEY" or "AZURE_SPEECH_REGION")) continue;
+                if (name is not ("GEMINI_API_KEY" or "GOOGLE_API_KEY")) continue;
                 var value = trimmed[(equals + 1)..].Trim();
                 if (value.Length >= 2 && ((value[0] == '"' && value[^1] == '"') || (value[0] == '\'' && value[^1] == '\''))) value = value[1..^1];
                 _values[name] = value;

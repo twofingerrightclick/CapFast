@@ -3,7 +3,6 @@ using System.Text.Json;
 namespace CapFast.Core;
 
 // Transcribe Live sends replacing interim hypotheses and authoritative final segments.
-// These are different from Live Translate's output-transcription deltas.
 public sealed class GeminiInputTranscript
 {
     private readonly string _session = Guid.NewGuid().ToString("N");
@@ -16,7 +15,7 @@ public sealed class GeminiInputTranscript
         var updates = new List<CaptionUpdate>(2);
         if (!message.TryGetProperty("serverContent", out var content)) return updates;
         if (content.TryGetProperty("interimInputTranscription", out var interim) && ReadText(interim) is { } partial)
-            updates.Add(new(Id, partial, false));
+            updates.Add(new(Id, partial, false, SourceLanguage: ReadLanguage(interim)));
         if (content.TryGetProperty("inputTranscription", out var final) && ReadText(final) is { } text)
         {
             if (final.TryGetProperty("startOffset", out var start) && final.TryGetProperty("endOffset", out var end))
@@ -26,11 +25,14 @@ public sealed class GeminiInputTranscript
                 _recentOffsets.Enqueue(offset);
                 if (_recentOffsets.Count > 256) _offsets.Remove(_recentOffsets.Dequeue());
             }
-            updates.Add(new(Id, text, true));
+            updates.Add(new(Id, text, true, SourceLanguage: ReadLanguage(final)));
             _utterance++;
         }
         return updates;
     }
+
+    private static string? ReadLanguage(JsonElement value) => value.TryGetProperty("languageCode", out var code)
+        && code.ValueKind == JsonValueKind.String ? SpeechLanguageAssignment.Normalize(code.GetString()) : null;
 
     private string Id => $"google-input:{_session}:{_utterance}";
     private static string? ReadText(JsonElement value)

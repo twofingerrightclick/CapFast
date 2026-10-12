@@ -12,8 +12,6 @@ internal static class ConfigurationChecks
         var file = Path.Combine(Path.GetTempPath(), "capfast-env-" + Guid.NewGuid() + ".env");
         var previousGemini = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
         var previousGoogle = Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
-        var previousAzure = Environment.GetEnvironmentVariable("AZURE_SPEECH_KEY");
-        var previousRegion = Environment.GetEnvironmentVariable("AZURE_SPEECH_REGION");
         try
         {
             var appearanceFile = file + ".appearance";
@@ -32,13 +30,37 @@ internal static class ConfigurationChecks
                     throw new Exception("Invalid appearance preference did not fall back safely.");
             }
             finally { File.Delete(appearanceFile); }
+            var preferencesFile = file + ".settings.json";
+            try
+            {
+                if (CaptionPreferences.Load(preferencesFile) != CaptionPreferences.Default)
+                    throw new Exception("Missing caption preferences did not use defaults.");
+                var saved = new CaptionSettings(loadLocalConfiguration: false)
+                {
+                    AudioDeviceId = "BlackHole2ch_UID", FontSize = 60, ReadingWordsPerMinute = 230,
+                    GeminiKey = "secret-must-not-be-saved"
+                };
+                CaptionPreferences.Save(saved, preferencesFile);
+                var reloaded = CaptionPreferences.Load(preferencesFile);
+                if (reloaded.AudioDeviceId != saved.AudioDeviceId || reloaded.FontSize != saved.FontSize
+                    || reloaded.ReadingWordsPerMinute != saved.ReadingWordsPerMinute)
+                    throw new Exception("Audio input or caption display preferences did not survive reload.");
+                if (File.ReadAllText(preferencesFile).Contains(saved.GeminiKey))
+                    throw new Exception("API key leaked into caption preferences.");
+                File.WriteAllText(preferencesFile, "{broken");
+                if (CaptionPreferences.Load(preferencesFile) != CaptionPreferences.Default)
+                    throw new Exception("Invalid caption preferences did not use defaults.");
+                File.WriteAllText(preferencesFile,
+                    "{\"audioDeviceId\":null,\"fontSize\":999,\"readingWordsPerMinute\":1}");
+                if (CaptionPreferences.Load(preferencesFile) != CaptionPreferences.Default)
+                    throw new Exception("Out-of-range caption preferences did not use defaults.");
+            }
+            finally { File.Delete(preferencesFile); }
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", null);
             Environment.SetEnvironmentVariable("GOOGLE_API_KEY", null);
-            Environment.SetEnvironmentVariable("AZURE_SPEECH_KEY", null);
-            Environment.SetEnvironmentVariable("AZURE_SPEECH_REGION", null);
-            File.WriteAllText(file, "# comment\nexport GEMINI_API_KEY = 'local-value'\nAZURE_SPEECH_KEY=azure-from-file\nAZURE_SPEECH_REGION=westus\nUNKNOWN=value\n");
+            File.WriteAllText(file, "# comment\nexport GEMINI_API_KEY = 'local-value'\nUNKNOWN=value\n");
             var config = new LocalConfiguration(file);
-            if (config.GoogleKey != "local-value" || config.Get("AZURE_SPEECH_REGION") != "westus" || config.Get("UNKNOWN") != "")
+            if (config.GoogleKey != "local-value" || config.Get("UNKNOWN") != "")
                 throw new Exception("Local config parse failed");
             if (new LocalConfiguration(file, readValues: false).GoogleKey != "") throw new Exception("Deferred configuration read local contents");
             var deferred = new CaptionSettings(loadLocalConfiguration: false) { IsLoadingConfiguration = true, GeminiKey = "manual-google" };
@@ -49,26 +71,24 @@ internal static class ConfigurationChecks
                 throw new Exception("Music rejection choice was lost from the session settings snapshot.");
             if (deferred.ConfigurationPath != LocalConfiguration.FallbackPath || !deferred.Copy().IsLoadingConfiguration)
                 throw new Exception("Deferred startup did not retain a probe-free fallback/loading state");
-            deferred.ApplyLocalConfiguration(config, "", "", "");
-            if (deferred.GeminiKey != "manual-google" || deferred.AzureKey != "azure-from-file" || deferred.AzureRegion != "westus"
+            deferred.ApplyLocalConfiguration(config, "");
+            if (deferred.GeminiKey != "manual-google"
                 || deferred.IsLoadingConfiguration || deferred.ConfigurationPath != file)
                 throw new Exception("Late configuration overwrote edits or lost untouched fields/path");
-            var azureEdited = new CaptionSettings(loadLocalConfiguration: false) { AzureKey = "manual-azure", AzureRegion = "manual-region" };
-            azureEdited.ApplyLocalConfiguration(config, "", "", "");
-            if (azureEdited.GeminiKey != "local-value" || azureEdited.AzureKey != "manual-azure" || azureEdited.AzureRegion != "manual-region")
-                throw new Exception("Late configuration did not preserve each independently edited field");
+            var untouched = new CaptionSettings(loadLocalConfiguration: false);
+            untouched.ApplyLocalConfiguration(config, "");
+            if (untouched.GeminiKey != "local-value")
+                throw new Exception("Late configuration did not load the untouched Google key");
             Environment.SetEnvironmentVariable("GOOGLE_API_KEY", "environment-value");
             if (config.GoogleKey != "environment-value") throw new Exception("Process environment did not override file");
             File.WriteAllText(file, new string('x', 65537));
             if (new LocalConfiguration(file).Error == null) throw new Exception("Oversized config accepted");
-            Console.WriteLine("Configuration checks passed: quotes, comments, allowlist, environment precedence, file size bound.");
+            Console.WriteLine("Configuration checks passed: API key loading and caption preference round trip, validation, and key exclusion.");
         }
         finally
         {
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", previousGemini);
             Environment.SetEnvironmentVariable("GOOGLE_API_KEY", previousGoogle);
-            Environment.SetEnvironmentVariable("AZURE_SPEECH_KEY", previousAzure);
-            Environment.SetEnvironmentVariable("AZURE_SPEECH_REGION", previousRegion);
             File.Delete(file);
         }
     }

@@ -5,7 +5,42 @@ internal static class ControllerChecks
 {
     public static async Task RunAsync()
     {
+        await CheckUnreadInactivityAsync(burst: false);
+        await CheckUnreadInactivityAsync(burst: true);
+        var dispatch = new Queue<Action>();
+        var assignmentSession = new AssignmentSession();
+        var assignmentController = new CaptionController(new CaptionSettings { GeminiKey = "test" }, _ => assignmentSession, dispatch.Enqueue);
+        await assignmentController.ToggleAsync();
+        while (dispatch.TryDequeue(out var action)) action();
+        assignmentSession.Emit(new("stale-epoch", "Obsolete caption", true, AssignmentEpoch: 1));
+        assignmentSession.HintInputLanguage("fr");
+        while (dispatch.TryDequeue(out var action)) action();
+        Require(assignmentController.Text == "", "Queued old assignment caption survived hint.");
+        assignmentSession.Emit(new("current-epoch", "Current caption", true, AssignmentEpoch: 2));
+        while (dispatch.TryDequeue(out var action)) action();
+        Require(assignmentController.Text == "Current caption", "Current assignment caption was rejected.");
+        assignmentSession.Emit(new("before-reset", "Old after reset", true, AssignmentEpoch: 2));
+        assignmentSession.ResetLanguageDetection();
+        while (dispatch.TryDequeue(out var action)) action();
+        Require(assignmentController.Text == "Current caption", "Reset replaced retained text with queued obsolete caption.");
+        await assignmentController.ShutdownAsync();
         var log = new ErrorLog(3);
+        Require(CommandCenterStatus.Describe(CaptionState.Live, AudioActivity.Idle,
+                "Listening locally — Google reconnects when speech resumes.").Contains("listening locally") &&
+                !CommandCenterStatus.Describe(CaptionState.Live, AudioActivity.Idle,
+                    "Listening locally — Google reconnects when speech resumes.").Contains("recovering"),
+            "Stable local listening was mislabeled as an active recovery");
+        Require(CommandCenterStatus.Describe(CaptionState.Live, AudioActivity.Idle,
+                "Google connection interrupted — reconnecting…").Contains("recovering"),
+            "Interrupted connection was not labeled as recovering");
+        Require(CommandCenterStatus.Describe(CaptionState.Starting, AudioActivity.Idle,
+                "Automatic recovery 1/3 in 1 seconds…").Contains("recovering"),
+            "Scheduled restart was not labeled as recovering");
+        Require(!CommandCenterStatus.Describe(CaptionState.Live, AudioActivity.Speech, "Live")
+                .Contains("Waiting for transcription") &&
+                !CommandCenterStatus.Describe(CaptionState.Live, AudioActivity.Idle, "Live")
+                .Contains("No qualified speech"),
+            "Command center inferred translation or qualification from audio activity alone");
         for (var i = 0; i < 5; i++) log.Add(i.ToString());
         Require(log.Entries.Count == 3 && log.Entries[0].Message == "2", "Log did not evict oldest entries");
         log.Clear(); Require(log.Entries.Count == 0, "Log clear failed");
@@ -61,6 +96,120 @@ internal static class ControllerChecks
         var unsafeFailure = new CaptionController(settings, _ => throw new Exception("secret-value"), a => a());
         await unsafeFailure.ToggleAsync();
         Require(!unsafeFailure.Status.Contains("secret-value") && !unsafeFailure.Errors.Entries.Single().Message.Contains("secret-value"), "Raw exception leaked");
+        var recoveryClock = new ManualClock();
+        var recoverySessions = new List<FakeSession>();
+        var recovering = new CaptionController(settings, _ =>
+        {
+            var session = new FakeSession(); session.Started.SetResult(); recoverySessions.Add(session); return session;
+        }, a => a(), recoveryClock);
+        await recovering.ToggleAsync();
+        recoverySessions[0].EmitEnded("Google audio streaming failed. Check the network and restart the session.");
+        await UntilAsync(() => recoverySessions[0].Disposed && recovering.Status.Contains("recovery", StringComparison.OrdinalIgnoreCase));
+        Require(recovering.State == CaptionState.Starting && recoverySessions.Count == 1,
+            "Recoverable session failure stopped instead of scheduling restart");
+        recoveryClock.Advance(1);
+        await UntilAsync(() => recoverySessions.Count == 2 && recovering.State == CaptionState.Live);
+        recoverySessions[0].Emit("Stale speech");
+        recoverySessions[1].Emit("Recovered speech");
+        Require(recovering.Text == "Recovered speech", "Restart did not accept new speech or accepted stale callback");
+        Require(recovering.Events.Entries.Any(entry => entry.Message.Contains("restart", StringComparison.OrdinalIgnoreCase)),
+            "Command center log omitted automatic restart");
+        recoverySessions[1].EmitEnded("Google audio streaming failed. Check the network and restart the session.");
+        await UntilAsync(() => recoverySessions[1].Disposed);
+        await recovering.PauseAsync();
+        recoveryClock.Advance(30);
+        Require(recoverySessions.Count == 2 && recovering.IsPaused, "Manual pause did not cancel pending recovery");
+        await recovering.ShutdownAsync();
+        var terminalSessions = new List<FakeSession>();
+        var terminal = new CaptionController(settings, _ =>
+        {
+            var session = new FakeSession(); session.Started.SetResult(); terminalSessions.Add(session); return session;
+        }, a => a(), recoveryClock);
+        await terminal.ToggleAsync();
+        terminalSessions[0].EmitEnded("Google rejected authentication (401). Check the API key in Settings.");
+        await UntilAsync(() => terminal.IsPaused);
+        recoveryClock.Advance(30);
+        Require(terminalSessions.Count == 1 && terminal.Status.Contains("401"), "Terminal authentication failure was retried");
+        await terminal.ShutdownAsync();
+        var classifiedSession = new ClassifiedSession();
+        var classified = new CaptionController(settings, _ => classifiedSession, a => a(), recoveryClock);
+        await classified.ToggleAsync();
+        classifiedSession.Fail(new("An operator must inspect this safe provider failure.", true));
+        await UntilAsync(() => classified.IsPaused);
+        recoveryClock.Advance(30);
+        Require(classifiedSession.Disposed && classified.Status.Contains("operator") && classified.Events.Entries.Last().Message.Contains("operator action"),
+            "Typed terminal failure did not reach the controller");
+        await classified.ShutdownAsync();
+        Require(CaptionFailurePolicy.RequiresOperatorAction("Gemini quota is exhausted (service 8).") &&
+                CaptionFailurePolicy.RequiresOperatorAction("Gemini denied access (service 7). Check project billing.") &&
+                CaptionFailurePolicy.RequiresOperatorAction("Gemini rejected the session setup (WebSocket 1008).") &&
+                CaptionFailurePolicy.RequiresOperatorAction("The selected Mac audio input stopped producing audio.") &&
+                CaptionFailurePolicy.RequiresOperatorAction("The selected audio input is unavailable. Choose another input in Settings and start again.") &&
+                CaptionFailurePolicy.RequiresOperatorAction("The selected audio input has an unsupported audio format. Choose another input in Settings and start again.") &&
+                CaptionFailurePolicy.RequiresOperatorAction("Mac audio capture could not start. Check the selected input and close other apps holding the device.") &&
+                CaptionFailurePolicy.RequiresOperatorAction("Mac speech and music classification is unavailable. Capture stopped without uploading unclassified audio. Relaunch the packaged app.") &&
+                CaptionFailurePolicy.RequiresOperatorAction("Mac speech classification returned an invalid frame. Capture stopped; restart the packaged app.") &&
+                !CaptionFailurePolicy.RequiresOperatorAction("Gemini connected, but the startup deadline expired before audio capture began. Check the connection and service availability.") &&
+                !CaptionFailurePolicy.RequiresOperatorAction("Gemini closed the session with an internal server error (WebSocket 1011)."),
+            "Failure policy misclassified quota, setup timeout, device, or ambiguous service error");
+        var startupClock = new ManualClock();
+        var startupAttempts = 0;
+        var startup = new CaptionController(settings, _ =>
+        {
+            if (++startupAttempts == 1)
+                throw new CaptionSessionException("Gemini connected, but the startup deadline expired before audio capture began. Check the connection and service availability.");
+            var session = new FakeSession(); session.Started.SetResult(); return session;
+        }, a => a(), startupClock);
+        await startup.ToggleAsync();
+        Require(startup.State == CaptionState.Starting && startupAttempts == 1 &&
+                startup.Status.Contains("Automatic recovery"),
+            "Transient Gemini startup deadline did not schedule recovery");
+        startupClock.Advance(1);
+        await UntilAsync(() => startup.State == CaptionState.Live && startupAttempts == 2);
+        await startup.ShutdownAsync();
+        var exhaustClock = new ManualClock();
+        var exhaustSessions = new List<FakeSession>();
+        var exhausting = new CaptionController(settings, _ =>
+        {
+            var session = new FakeSession(); session.Started.SetResult(); exhaustSessions.Add(session); return session;
+        }, a => a(), exhaustClock);
+        await exhausting.ToggleAsync();
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            exhaustSessions[attempt].EmitEnded("Gemini service is unavailable (service 503).");
+            await UntilAsync(() => exhaustSessions[attempt].Disposed);
+            exhaustClock.Advance(1 << attempt);
+            var next = attempt + 2;
+            await UntilAsync(() => exhaustSessions.Count == next && exhausting.State == CaptionState.Live);
+        }
+        exhaustSessions[3].EmitEnded("Gemini service is unavailable (service 503).");
+        await UntilAsync(() => exhausting.IsPaused);
+        exhaustClock.Advance(60);
+        Require(exhaustSessions.Count == 4 && exhausting.Status.Contains("after 3 attempts") &&
+                exhausting.Events.Entries.Last().Message.Contains("exhausted"),
+            "Automatic restart budget was not bounded or reported");
+        await exhausting.ShutdownAsync();
+        var stableClock = new ManualClock();
+        var stableSessions = new List<FakeSession>();
+        var stable = new CaptionController(settings, _ =>
+        {
+            var session = new FakeSession(); session.Started.SetResult(); stableSessions.Add(session); return session;
+        }, a => a(), stableClock);
+        await stable.ToggleAsync();
+        for (var failure = 0; failure < 4; failure++)
+        {
+            stableSessions[failure].Emit(new CaptionUpdate($"healthy-{failure}", "Caption delivered.", true));
+            stableClock.Advance(121);
+            stableSessions[failure].EmitEnded("Gemini service is unavailable (service 503).");
+            await UntilAsync(() => stableSessions[failure].Disposed);
+            Require(stable.Status.Contains("1/3") && (failure == 0 || stable.Events.Entries.Any(entry =>
+                    entry.Message.Contains("two minutes live with an accepted caption"))),
+                "Two-minute live session with an accepted caption did not reset recovery budget");
+            stableClock.Advance(1);
+            var expected = failure + 2;
+            await UntilAsync(() => stableSessions.Count == expected && stable.State == CaptionState.Live);
+        }
+        await stable.ShutdownAsync();
         var technicalSession = new FakeSession();
         technicalSession.Started.SetResult();
         var technicalController = new CaptionController(settings, _ => technicalSession, a => a());
@@ -70,6 +219,9 @@ internal static class ControllerChecks
         technicalSession.Emit(new CaptionUpdate("technical", "JSON parsing error: {\"unexpected\": true}", true));
         Require(technicalController.Text == "" && technicalController.Errors.Entries.Last().Message.Contains("withheld"),
             "Technical text reached direct audience captions or was not diagnosed");
+        Require(technicalController.Events.Entries.Last().Message.Contains("Rejected provider output") &&
+                !technicalController.Events.Entries.Any(entry => entry.Message.Contains("unexpected")),
+            "Command center event did not explain rejected output safely");
         technicalSession.Emit(new CaptionUpdate("bracketed", "[The speaker resumes] Welcome.", true));
         Require(technicalController.Text.Contains("[The speaker resumes] Welcome."), "Legitimate bracketed caption was rejected");
         technicalController.ClearCaptions();
@@ -158,6 +310,8 @@ internal static class ControllerChecks
         idleClock.Advance(1);
         Require(idleFades == 1 && immediateClears == 0 && idle.Text == "" && idle.CaptionUtteranceId is null,
             "Missing translations did not request a fade, or empty/duplicate results extended the timeout");
+        Require(idle.Events.Entries.Last().Message.Contains("capture is still live"),
+            "Command center log did not distinguish an inactivity fade from stopped capture");
         idleClock.Advance(30);
         Require(idleFades == 1, "Empty screen repeatedly faded");
         idleSession.Emit("Speech returned");
@@ -176,6 +330,9 @@ internal static class ControllerChecks
         await race.ToggleAsync();
         raceSession.EmitDiagnostic("Recovery may have left an unfinished caption."); Drain();
         Require(race.Errors.Entries.Count == 1 && !race.IsPaused, "Recovery diagnostic was hidden or stopped capture");
+        raceSession.EmitStatus("Google connection interrupted — reconnecting…"); Drain();
+        Require(race.Events.Entries.Last().Message.Contains("recovering"),
+            "Command center log did not record reconnection");
         raceSession.Emit("Old caption"); Drain();
         raceClock.Advance(15); var staleInactivity = deferred.Dequeue();
         raceSession.Emit("New caption"); Drain(); staleInactivity();
@@ -223,13 +380,11 @@ internal static class ControllerChecks
         filteredSession.Emit(new CaptionUpdate("only-blocked", "Late safe duplicate", true));
         Require(filteredUpdates.Last().Text == "", "Filtered final lost duplicate suppression");
         await filtered.ShutdownAsync();
-        var bilingualSettings = new CaptionSettings(loadLocalConfiguration: false) { GeminiKey = "test", FrenchEnabled = true };
+        var bilingualSettings = new CaptionSettings(loadLocalConfiguration: false) { GeminiKey = "test" };
         var bilingualSession = new FakeSession(); bilingualSession.Started.SetResult();
         var bilingualClock = new ManualClock();
         var bilingual = new CaptionController(bilingualSettings, snapshot =>
         {
-            Require(snapshot.ShowFrench && snapshot.EffectiveGoogleMode == GoogleCaptionMode.TwoStage,
-                "French configuration did not reach the session factory");
             return bilingualSession;
         }, a => a(), bilingualClock);
         var bilingualUpdates = new List<CaptionUpdate>();
@@ -250,17 +405,67 @@ internal static class ControllerChecks
         bilingualClock.Advance(15);
         Require(bilingualFades == 2 && bilingual.Text == "", "French text failed to fade when English history was empty");
         await bilingual.PauseAsync();
-        bilingualSettings.FrenchEnabled = false; bilingual.SettingsChanged();
-        Require(languageClears == 1 && bilingual.CaptionUtteranceId is null && !bilingualSettings.ShowFrench,
-            "Changing caption languages retained stale bilingual captions");
+        bilingual.ClearCaptions();
+        Require(languageClears == 1 && bilingual.CaptionUtteranceId is null,
+            "Clearing paired captions retained stale captions");
         await bilingual.ShutdownAsync();
         Console.WriteLine("Controller checks passed: paused startup, selected source, pause during connect, rapid resume, stale callbacks, retained captions, shutdown, missing configuration, rolling log.");
     }
+    private static async Task CheckUnreadInactivityAsync(bool burst)
+    {
+        var clock = new ManualClock();
+        var session = new FakeSession(); session.Started.SetResult();
+        var controller = new CaptionController(new CaptionSettings(loadLocalConfiguration: false) { GeminiKey = "test" },
+            _ => session, action => action(), clock);
+        var presentation = new CaptionPresentation { ReadingWordsPerMinute = 180 };
+        presentation.Configure(24, 1, text => text.Length, "unread-inactivity");
+        double Now() => (clock.GetUtcNow() - DateTimeOffset.UnixEpoch).TotalSeconds;
+        controller.HasUnreadCaptions = () => presentation.HasUnreadCaptions(Now());
+        controller.CaptionReceived += update => presentation.Submit(update);
+        var fadedAt = -1d;
+        controller.CaptionsFading += () => { fadedAt = Now(); presentation.Clear(); };
+        controller.CaptionsCleared += presentation.Clear;
+        var words = Enumerable.Range(1, 60).Select(index => $"w{index:00}").ToArray();
+        var displayed = new List<string>();
+        await controller.ToggleAsync();
+        if (burst)
+            for (var index = 0; index < 4; index++)
+                session.Emit(new CaptionUpdate($"burst-{index}", string.Join(" ", words.Skip(index * 15).Take(15)), true));
+        else session.Emit(new CaptionUpdate("long-final", string.Join(" ", words), true));
+        for (var tick = 0; tick < 240 && fadedAt < 0; tick++)
+        {
+            if (presentation.TryPresent(Now(), out var frame))
+            {
+                displayed.AddRange(frame!.Lines.Single().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+                presentation.Presented(Now());
+            }
+            clock.Advance(.25);
+            if (Now() == 15)
+                Require(fadedAt < 0 && presentation.HasUnreadCaptions(Now()), "Inactivity erased unread long-final words at fifteen seconds");
+            if (Now() == 16)
+                session.EmitDiagnostic("Translation request is still pending.");
+        }
+        Require(displayed.SequenceEqual(words), "Inactivity discarded or replayed words while a later result was pending");
+        Require(fadedAt >= 20 && !presentation.HasUnreadCaptions(Now()), "Caption did not finish its reading time before fading");
+        // Explicit clearing still removes unread text immediately.
+        session.Emit(new CaptionUpdate("clear-unread", string.Join(" ", words), true));
+        controller.ClearCaptions();
+        Require(!presentation.HasUnreadCaptions(Now()), "Explicit clear retained unread captions");
+        await controller.ShutdownAsync();
+    }
+
     private static void Require(bool valid, string message) { if (!valid) throw new Exception(message); }
+    private static async Task UntilAsync(Func<bool> ready)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (!ready() && DateTime.UtcNow < deadline) await Task.Delay(5);
+        Require(ready(), "Timed out waiting for controller transition");
+    }
     private sealed class ManualClock : TimeProvider
     {
         private readonly List<ManualTimer> _timers = new();
         private double _seconds;
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch.AddSeconds(_seconds);
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
             var timer = new ManualTimer(callback, state, _seconds + dueTime.TotalSeconds);
@@ -293,6 +498,19 @@ internal static class ControllerChecks
         public Task StartAsync(CancellationToken cancellationToken = default) => Task.Delay(Timeout.Infinite, cancellationToken);
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
+    private sealed class AssignmentSession : ICaptionSession, ILanguageAssignmentSession
+    {
+        public LanguageAssignment? LanguageAssignment { get; private set; } = new("en", "sw", "fr", 1);
+        public event Action<LanguageAssignment?>? LanguageAssignmentChanged;
+        public event Action<CaptionUpdate>? Caption;
+        public event Action<string>? Status { add { } remove { } }
+        public event Action<string>? Ended { add { } remove { } }
+        public void Emit(CaptionUpdate update) => Caption?.Invoke(update);
+        public void HintInputLanguage(string code) { LanguageAssignment = new(code, "en", "sw", 2); LanguageAssignmentChanged?.Invoke(LanguageAssignment); }
+        public void ResetLanguageDetection() { LanguageAssignment = null; LanguageAssignmentChanged?.Invoke(null); }
+        public Task StartAsync(CancellationToken token = default) => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
     private sealed class FakeSession : ICaptionSession, IAudioActivitySession, ICaptionDiagnosticsSession
     {
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -302,11 +520,24 @@ internal static class ControllerChecks
         public event Action<string>? Diagnostic;
         public void EmitDiagnostic(string message) => Diagnostic?.Invoke(message);
         public void EmitActivity(AudioActivity activity) => AudioActivityChanged?.Invoke(activity);
-        public event Action<string>? Status { add { } remove { } }
-        public event Action<string>? Ended { add { } remove { } }
+        public event Action<string>? Status;
+        public event Action<string>? Ended;
+        public void EmitStatus(string message) => Status?.Invoke(message);
+        public void EmitEnded(string message) => Ended?.Invoke(message);
         public Task StartAsync(CancellationToken cancellationToken = default) => Started.Task;
         public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
         public void Emit(string text) => Caption?.Invoke(new("id", text, false));
         public void Emit(CaptionUpdate update) => Caption?.Invoke(update);
+    }
+    private sealed class ClassifiedSession : ICaptionSession, ICaptionFailureSession
+    {
+        public bool Disposed { get; private set; }
+        public event Action<CaptionUpdate>? Caption { add { } remove { } }
+        public event Action<string>? Status { add { } remove { } }
+        public event Action<string>? Ended { add { } remove { } }
+        public event Action<CaptionFailure>? Failure;
+        public void Fail(CaptionFailure failure) => Failure?.Invoke(failure);
+        public Task StartAsync(CancellationToken token = default) => Task.CompletedTask;
+        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
 }

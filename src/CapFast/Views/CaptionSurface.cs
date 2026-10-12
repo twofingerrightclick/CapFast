@@ -33,6 +33,7 @@ internal sealed class CaptionSurface : Border
     private int _readingWordsPerMinute = 180;
     private Color _captionColor = Colors.White;
     public bool CanAcceptCaptions => _presentation.CanAcceptCaptions;
+    public bool HasUnreadCaptions => _presentation.HasUnreadCaptions(_presentationClock.Elapsed.TotalSeconds);
 
     public CaptionSurface()
     {

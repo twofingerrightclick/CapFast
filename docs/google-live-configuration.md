@@ -1,3 +1,7 @@
+# Historical direct Google translation configuration
+
+This documents the retired direct Live Translation experiment and is retained as research history. For the current app, configure a Google key with access and quota for `gemini-3.5-transcribe-live` and `gemini-3.8-flash`, then use Start captions in Settings. The README describes the supported automatic two-output flow.
+
 # Google Gemini Live configuration for CapFast
 
 Researched 8 October 2026 against Google's current documentation and SDK source. No API key was read, and no account settings or billing were changed.
