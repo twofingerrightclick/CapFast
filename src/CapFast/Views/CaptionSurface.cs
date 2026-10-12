@@ -32,6 +32,9 @@ internal sealed class CaptionSurface : Border
     private bool _waitingForReveal;
     private int _readingWordsPerMinute = 180;
     private Color _captionColor = Colors.White;
+    public string QueueStatus => $"{_presentation.DisplayDelaySeconds(_presentationClock.Elapsed.TotalSeconds):0.0}s display wait"
+        + (_presentation.IsCatchingUp ? " · catching up" : "")
+        + (_presentation.SkippedPhrases > 0 ? $" · {_presentation.SkippedPhrases} older fragments skipped" : "");
     public bool CanAcceptCaptions => _presentation.CanAcceptCaptions;
     public bool HasUnreadCaptions => _presentation.HasUnreadCaptions(_presentationClock.Elapsed.TotalSeconds);
 
@@ -49,10 +52,12 @@ internal sealed class CaptionSurface : Border
         SizeChanged += (_, _) => FitCaption();
     }
 
-    public void Configure(double fontSize, int readingWordsPerMinute)
+    public void Configure(CaptionSettings settings)
     {
-        _text.FontSize = fontSize;
-        _readingWordsPerMinute = readingWordsPerMinute;
+        _text.FontSize = settings.FontSize;
+        _readingWordsPerMinute = settings.ReadingWordsPerMinute;
+        _presentation.CatchUpEnabled = settings.AutomaticCaptionCatchUp;
+        _presentation.ReadingSpeedForLanguage = settings.ReadingSpeedFor;
         FitCaption();
     }
 
@@ -77,7 +82,7 @@ internal sealed class CaptionSurface : Border
             if (string.IsNullOrWhiteSpace(update.Text)) return true;
             ClearCaption();
         }
-        var ready = _presentation.Submit(update);
+        var ready = _presentation.Submit(update, _presentationClock.Elapsed.TotalSeconds);
         FitCaption();
         return ready;
     }
@@ -158,7 +163,7 @@ internal sealed class CaptionSurface : Border
         var now = _presentationClock.Elapsed.TotalSeconds;
         foreach (var (word, brush) in _wordBrushes) brush.Opacity = word.Opacity(now);
         if (_scrollTarget is null) { StartNextFrame(); return; }
-        var progress = Math.Clamp(_scrollClock.Elapsed.TotalMilliseconds / 300, 0, 1);
+        var progress = Math.Clamp(_scrollClock.Elapsed.TotalMilliseconds / (_presentation.IsCatchingUp ? 100 : 300), 0, 1);
         var eased = progress * progress * (3 - 2 * progress);
         for (var index = 0; index < _rowLabels.Count; index++)
         {
@@ -181,7 +186,7 @@ internal sealed class CaptionSurface : Border
     private void DrawRows(string[] lines, bool preserveReveal = false, bool revealNewWords = true)
     {
         var now = _presentationClock.Elapsed.TotalSeconds;
-        if (!preserveReveal) _wordReveal.Update(lines, now, revealNewWords);
+        if (!preserveReveal) _wordReveal.Update(lines, now, revealNewWords && !_presentation.IsCatchingUp);
         _captionCanvas.Children.Clear(); _rowLabels.Clear(); _wordBrushes.Clear();
         for (var index = 0; index < lines.Length; index++)
         {

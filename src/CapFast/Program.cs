@@ -53,7 +53,11 @@ public sealed class App : Application
             {
                 IsLoadingConfiguration = true, Appearance = _appearance,
                 AudioDeviceId = saved.AudioDeviceId, FontSize = saved.FontSize,
-                ReadingWordsPerMinute = saved.ReadingWordsPerMinute
+                ReadingWordsPerMinute = saved.ReadingWordsPerMinute,
+                EnglishReadingWordsPerMinute = saved.EnglishReadingWordsPerMinute,
+                SwahiliReadingWordsPerMinute = saved.SwahiliReadingWordsPerMinute,
+                FrenchReadingWordsPerMinute = saved.FrenchReadingWordsPerMinute,
+                AutomaticCaptionCatchUp = saved.AutomaticCaptionCatchUp
             }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.RejectMusic),
                 action => Dispatcher.UIThread.Post(action));
             _controller.Changed += ApplyAppearance;

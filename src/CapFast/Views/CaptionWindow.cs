@@ -56,12 +56,13 @@ public sealed class CaptionWindow : Window
         _controller.CaptionsCleared += ClearCaption;
         _controller.CaptionsFading += FadeCaption;
         _controller.CanAcceptCaptions = () => _englishCaptions.CanAcceptCaptions && _frenchCaptions.CanAcceptCaptions;
+        _controller.DisplayQueueStatus = () => $"English / Swahili: {_englishCaptions.QueueStatus}\nFrench: {_frenchCaptions.QueueStatus}";
         _controller.HasUnreadCaptions = () => _englishCaptions.HasUnreadCaptions || _frenchCaptions.HasUnreadCaptions;
         Closed += (_, _) => { _controller.Changed -= Refresh; _controller.CaptionReceived -= ReceiveCaption;
             _controller.LanguageAssignmentChanged -= ApplyLanguages;
             _controller.CaptionsFading -= FadeCaption;
             _controller.CaptionsCleared -= ClearCaption; _controller.CanAcceptCaptions = null;
-            _controller.HasUnreadCaptions = null;
+            _controller.HasUnreadCaptions = null; _controller.DisplayQueueStatus = null;
             _englishCaptions.Stop(); _frenchCaptions.Stop(); };
         Closing += async (_, e) =>
         {
@@ -132,15 +133,15 @@ public sealed class CaptionWindow : Window
                     var slot = _languages.Slot(code);
                     if (slot < 0) return true;
                     return (slot == 0 ? _englishCaptions : _frenchCaptions).Submit(update with
-                    { UtteranceId = $"{update.UtteranceId}:{code}", Text = text, FrenchText = null });
+                    { UtteranceId = $"{update.UtteranceId}:{code}", Text = text, FrenchText = null, PrimaryLanguage = code });
                 }
                 var accepted = Submit(primary, update.Text);
                 accepted = Submit(secondary, update.FrenchText ?? "") && accepted;
                 if (!accepted) _ = _controller.PauseForDisplayBacklogAsync();
                 return;
             }
-            var ready = _englishCaptions.Submit(update);
-            ready = _frenchCaptions.Submit(update with { Text = update.FrenchText ?? "", FrenchText = null }) && ready;
+            var ready = _englishCaptions.Submit(update with { PrimaryLanguage = "en" });
+            ready = _frenchCaptions.Submit(update with { Text = update.FrenchText ?? "", FrenchText = null, PrimaryLanguage = "fr" }) && ready;
             if (!ready) _ = _controller.PauseForDisplayBacklogAsync();
         }
         catch (InvalidOperationException) { _ = _controller.PauseForDisplayBacklogAsync(); }
@@ -160,8 +161,8 @@ public sealed class CaptionWindow : Window
 
     private void FitCaption()
     {
-        _englishCaptions.Configure(_controller.Settings.FontSize, _controller.Settings.ReadingWordsPerMinute);
-        _frenchCaptions.Configure(_controller.Settings.FontSize, _controller.Settings.ReadingWordsPerMinute);
+        _englishCaptions.Configure(_controller.Settings);
+        _frenchCaptions.Configure(_controller.Settings);
     }
 
     public void ToggleFullscreen() => WindowState = WindowState == WindowState.FullScreen ? WindowState.Normal : WindowState.FullScreen;

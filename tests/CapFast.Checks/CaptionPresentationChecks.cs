@@ -148,12 +148,82 @@ public static class CaptionPresentationChecks
         Equal("z", Present(backlog, 64).Lines);
         if (!backlog.CanAcceptCaptions) throw new Exception("Drained presentation did not reopen capture capacity.");
 
-        Console.WriteLine("Caption presentation checks passed: full height, phrase openings, paced chunks, cumulative deadlines, minimum scroll, resize replay, cancellation, Unicode, partial budgets, and retained overflow.");
+        var bilingual = New(1000, 1);
+        bilingual.ReadingSpeedForLanguage = language => language switch { "sw" => 120, "en" => 240, _ => 180 };
+        var twelveWords = string.Join(" ", Enumerable.Repeat("word", 12));
+        bilingual.Submit(new("sw", twelveWords, true, PrimaryLanguage: "sw"));
+        if (Present(bilingual, 0).HoldFor.TotalSeconds != 6)
+            throw new Exception("Swahili reading speed was not applied to its own phrase.");
+        bilingual.Clear();
+        bilingual.Submit(new("en", twelveWords, true, PrimaryLanguage: "en"));
+        if (Present(bilingual, 0).HoldFor.TotalSeconds != 3)
+            throw new Exception("English reading speed did not override Swahili on the shared surface.");
+        bilingual.Clear();
+        bilingual.Submit(new("fr", twelveWords, true, PrimaryLanguage: "fr"));
+        if (Present(bilingual, 0).HoldFor.TotalSeconds != 4)
+            throw new Exception("Unset language speed did not use the shared default.");
+
+        var accelerated = New(1000, 1);
+        accelerated.CatchUpEnabled = true;
+        accelerated.Submit(new("long", string.Join(" ", Enumerable.Repeat("word", 60)), true), 0);
+        Present(accelerated, 0); // A 20-second visible reading deadline is already established.
+        accelerated.Submit(new("new", "new thought", true), 0);
+        if (accelerated.DisplayDelaySeconds(3.1) < 3 || !accelerated.IsCatchingUp)
+            throw new Exception("Three seconds of display waiting did not engage catch-up.");
+        Blocked(accelerated, 3.1);
+        Equal("new thought", Present(accelerated, 4.7).Lines);
+        if (accelerated.DisplayDelaySeconds(4.7) != 0 || accelerated.IsCatchingUp)
+            throw new Exception("Catch-up remained active after the waiting queue drained.");
+        accelerated.CatchUpEnabled = false;
+        if (accelerated.IsCatchingUp) throw new Exception("Turning catch-up off did not clear its status immediately.");
+
+        var staleQueue = New(1000, 1);
+        staleQueue.CatchUpEnabled = true;
+        staleQueue.Submit(new("old", "obsolete opening", true), 0);
+        staleQueue.Submit(new("middle", "obsolete middle", true), .5);
+        staleQueue.Submit(new("latest", "latest thought", true), 4);
+        Equal("latest thought", Present(staleQueue, 7).Lines);
+        if (staleQueue.SkippedPhrases != 2 || staleQueue.PendingPhrases != 0)
+            throw new Exception("Stale queued captions were not trimmed with explicit accounting.");
+        staleQueue.Submit(new("old", "late stale revision", true), 7.1);
+        if (staleQueue.PendingPhrases != 0) throw new Exception("A skipped phrase was replayed by a late revision.");
+
+        var crowded = New(1000, 1);
+        crowded.CatchUpEnabled = true;
+        for (var index = 0; index < 32; index++) crowded.Submit(new($"old-{index}", "old", true), 0);
+        if (!crowded.Submit(new("fresh", "current thought", true), 7) || crowded.SkippedPhrases != 31)
+            throw new Exception("Catch-up did not free stale display capacity before accepting live speech.");
+        Equal("current thought", Present(crowded, 7).Lines);
+        if (crowded.SkippedPhrases != 32)
+            throw new Exception("Stale backlog was not fully accounted for at presentation.");
+
+        var sole = New(1000, 1);
+        sole.CatchUpEnabled = true;
+        sole.Submit(new("only", "retain the only thought", true), 0);
+        Equal("retain the only thought", Present(sole, 8).Lines);
+        if (sole.SkippedPhrases != 0) throw new Exception("The sole queued phrase was discarded as stale.");
+
+        var resumedSuffix = New(1000, 1);
+        resumedSuffix.CatchUpEnabled = true;
+        resumedSuffix.Submit(new("partial", "first", false), 0); Present(resumedSuffix, 0);
+        resumedSuffix.Submit(new("partial", "first second", false), 10);
+        if (resumedSuffix.DisplayDelaySeconds(10) != 0)
+            throw new Exception("A newly arrived partial suffix inherited stale queue age.");
+
+        var disabled = New(1000, 1);
+        disabled.Submit(new("long", string.Join(" ", Enumerable.Repeat("word", 60)), true), 0);
+        Present(disabled, 0);
+        disabled.Submit(new("next", "next", true), 0);
+        Blocked(disabled, 10);
+        if (disabled.SkippedPhrases != 0 || disabled.IsCatchingUp)
+            throw new Exception("Disabled catch-up changed the old reading schedule.");
+
+        Console.WriteLine("Caption presentation checks passed: full height, phrase openings, paced chunks, cumulative deadlines, minimum scroll, resize replay, cancellation, Unicode, partial budgets, retained overflow, per-language reading, and bounded catch-up.");
     }
 
     private static CaptionPresentation New(double width, int rows, Func<string, double>? measure = null)
     {
-        var presentation = new CaptionPresentation();
+        var presentation = new CaptionPresentation { CatchUpEnabled = false };
         presentation.Configure(width, rows, measure ?? (text => text.Length), "initial");
         return presentation;
     }

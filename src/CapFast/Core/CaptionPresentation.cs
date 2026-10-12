@@ -9,10 +9,12 @@ public sealed record CaptionPresentationFrame(IReadOnlyList<string> Lines, int S
 // until every chunk has actually been presented, even across resize and pause.
 public sealed class CaptionPresentation
 {
-    private sealed class Phrase(CaptionUpdate update)
+    private sealed class Phrase(CaptionUpdate update, double acceptedAt)
     {
         public string Id = update.UtteranceId;
         public string Text = update.Text;
+        public string? Language = update.PrimaryLanguage;
+        public double AcceptedAt = acceptedAt;
         public bool Final = update.IsFinal;
         public int Offset;
         public bool Queued;
@@ -34,11 +36,21 @@ public sealed class CaptionPresentation
     private int _rows = 1;
     private string _geometry = "";
     private long _replaySequence;
+    private double _lastNow;
     private Func<string, double> _measure = text => text.Length;
     public int Generation { get; private set; }
     public int PendingPhrases => _queue.Count;
     public IReadOnlyList<string> CurrentLines => _visible.Select(line => line.Text).ToArray();
     public int ReadingWordsPerMinute { get; set; } = 180;
+    public Func<string?, int>? ReadingSpeedForLanguage { get; set; }
+    public bool CatchUpEnabled { get; set; } = true;
+    public bool IsCatchingUp => CatchUpEnabled && QueueDelay(_lastNow) >= 3;
+    public int SkippedPhrases { get; private set; }
+    public double DisplayDelaySeconds(double nowSeconds)
+    {
+        AdvanceClock(nowSeconds);
+        return QueueDelay(_lastNow);
+    }
     public bool HasPendingPresentation => _pending is not null;
     public bool HasUnreadCaptions(double nowSeconds) => _pending is not null || _queue.Count > 0 ||
         _visible.Any(line => line.ReadyAt > nowSeconds);
@@ -47,8 +59,10 @@ public sealed class CaptionPresentation
     private static int UnreadCaptureLength(Phrase phrase) => Math.Max(0, phrase.Text.Length - Math.Max(phrase.Offset, phrase.ReplayEnd));
 
     // False means the entire overflow phrase was retained, but capture must stop.
-    public bool Submit(CaptionUpdate update)
+    public bool Submit(CaptionUpdate update, double nowSeconds = 0)
     {
+        AdvanceClock(nowSeconds);
+        ApplyCatchUp(_lastNow);
         if (_finished.Contains(update.UtteranceId)) return true;
         if (string.IsNullOrWhiteSpace(update.Text))
         {
@@ -68,6 +82,8 @@ public sealed class CaptionPresentation
         if (_phrases.TryGetValue(update.UtteranceId, out var phrase))
         {
             if (phrase.Text == update.Text && phrase.Final == update.IsFinal) return true;
+            var newlyUnreadSuffix = !phrase.Queued && phrase.Offset >= phrase.Text.Length &&
+                update.Text.Length > phrase.Text.Length;
             CancelPending();
             if (_visible.LastOrDefault()?.Phrase == phrase)
             {
@@ -75,6 +91,8 @@ public sealed class CaptionPresentation
                 phrase.ReviseTail = true;
             }
             phrase.Text = update.Text; phrase.Final = update.IsFinal;
+            phrase.Language = update.PrimaryLanguage ?? phrase.Language;
+            if (newlyUnreadSuffix) phrase.AcceptedAt = _lastNow;
             phrase.CachedIncoming = null;
             phrase.Offset = Boundary(phrase.Text, Math.Min(phrase.Offset, phrase.Text.Length));
             phrase.ReplayEnd = Boundary(phrase.Text, Math.Min(phrase.ReplayEnd, phrase.Text.Length));
@@ -87,7 +105,7 @@ public sealed class CaptionPresentation
             if (_queue.Count(item => UnreadCaptureLength(item) > 0) >= 33) throw new InvalidOperationException("Caption display backlog is full.");
             foreach (var stale in _phrases.Values.Where(item => !item.Queued && item != _visible.LastOrDefault()?.Phrase).ToArray())
                 _phrases.Remove(stale.Id);
-            phrase = new(update); _phrases.Add(phrase.Id, phrase);
+            phrase = new(update, _lastNow); _phrases.Add(phrase.Id, phrase);
             _queue.AddLast(phrase); phrase.Queued = true;
         }
         return CanAcceptCaptions;
@@ -95,6 +113,7 @@ public sealed class CaptionPresentation
 
     public void Configure(double width, int rows, Func<string, double> measure, string geometry, double nowSeconds = 0)
     {
+        AdvanceClock(nowSeconds);
         _measure = measure;
         if (_width == width && _rows == rows && _geometry == geometry) return;
         CancelPending(); Generation++;
@@ -118,7 +137,8 @@ public sealed class CaptionPresentation
                 var phrase = group.Key.Phrase;
                 var end = group.Max(line => line.End);
                 if (phrase.Text != group.Key.Source)
-                    phrase = new(new CaptionUpdate($"display-replay-{++_replaySequence}", group.Key.Source[..end], true));
+                    phrase = new(new CaptionUpdate($"display-replay-{++_replaySequence}", group.Key.Source[..end], true,
+                        PrimaryLanguage: phrase.Language), phrase.AcceptedAt);
                 if (phrase.Queued) _queue.Remove(phrase);
                 phrase.Offset = group.Min(line => line.Start); phrase.ReviseTail = false;
                 phrase.CachedIncoming = null;
@@ -135,8 +155,10 @@ public sealed class CaptionPresentation
 
     public bool TryPresent(double nowSeconds, out CaptionPresentationFrame? frame)
     {
+        AdvanceClock(nowSeconds);
         frame = null;
         if (_pending is not null) return false;
+        ApplyCatchUp(_lastNow);
         while (_queue.First is { } node)
         {
             var phrase = node.Value;
@@ -164,8 +186,10 @@ public sealed class CaptionPresentation
             }
             var weights = exposedLines.Select(ReadingUnits).ToArray();
             var units = weights.Sum();
-            var seconds = units * 60d / Math.Clamp(ReadingWordsPerMinute, 80, 300);
-            var hold = TimeSpan.FromSeconds(units == 0 ? 0 : phrase.ReviseTail ? seconds : Math.Max(1.5, seconds));
+            var speed = ReadingSpeedForLanguage?.Invoke(phrase.Language) ?? ReadingWordsPerMinute;
+            var seconds = units * 60d / Math.Clamp(speed, 80, 300);
+            var normalHold = units == 0 ? 0 : phrase.ReviseTail ? seconds : Math.Max(1.5, seconds);
+            var hold = TimeSpan.FromSeconds(IsCatchingUp ? AcceleratedHold(normalHold, QueueDelay(_lastNow)) : normalHold);
             _pending = new(phrase, incoming[^1].End, before, incoming, hold, replay, weights);
             _visible = kept;
             frame = new(CurrentLines, scroll, hold, animationLines);
@@ -177,6 +201,7 @@ public sealed class CaptionPresentation
     // Start reading time after the frame is fully visible, not at service receipt.
     public void Presented(double nowSeconds)
     {
+        AdvanceClock(nowSeconds);
         if (_pending is not { } pending) return;
         _pending = null;
         var start = pending.Replay ? nowSeconds : Math.Max(_readingCursor, nowSeconds);
@@ -192,6 +217,48 @@ public sealed class CaptionPresentation
         }
         pending.Phrase.ReviseTail = false;
         FinishChunk(pending.Phrase, pending.End);
+        ApplyCatchUp(_lastNow);
+    }
+
+    private void AdvanceClock(double nowSeconds)
+    {
+        if (!double.IsFinite(nowSeconds) || nowSeconds < 0)
+            throw new ArgumentOutOfRangeException(nameof(nowSeconds));
+        _lastNow = Math.Max(_lastNow, nowSeconds);
+    }
+
+    private double QueueDelay(double nowSeconds) => _queue.First is { } first
+        ? Math.Max(0, nowSeconds - first.Value.AcceptedAt) : 0;
+
+    private static double AcceleratedHold(double normal, double wait) => normal == 0 ? 0 :
+        Math.Max(.4, normal / Math.Clamp(2 + (wait - 3) / 1.5, 2, 4));
+
+    private void ApplyCatchUp(double nowSeconds)
+    {
+        if (!CatchUpEnabled) return;
+        // Discard stale queued phrases only when a newer phrase can replace
+        // them. Already visible rows remain until the normal scroll removes
+        // them, and the newest thought is always retained.
+        while (_queue.Count > 1 && _queue.First is { } oldest && nowSeconds - oldest.Value.AcceptedAt > 6)
+        {
+            var phrase = oldest.Value;
+            if (_pending?.Phrase == phrase) break;
+            _queue.RemoveFirst(); phrase.Queued = false;
+            _phrases.Remove(phrase.Id);
+            _finished.Add(phrase.Id); _finishedOrder.Enqueue(phrase.Id);
+            while (_finishedOrder.Count > 256) _finished.Remove(_finishedOrder.Dequeue());
+            SkippedPhrases++;
+        }
+        var wait = QueueDelay(nowSeconds);
+        if (wait < 3) return;
+        // A newly arrived queue can turn an already scheduled 20-second
+        // reading deadline into the source of a long presentation drift.
+        var remaining = Math.Clamp(1.5 - (wait - 3) * .35, .35, 1.5);
+        var latest = nowSeconds + remaining;
+        _readingCursor = Math.Min(_readingCursor, latest);
+        for (var index = 0; index < _visible.Count; index++)
+            if (_visible[index].ReadyAt > latest)
+                _visible[index] = _visible[index] with { ReadyAt = latest };
     }
 
     private static double ReadingUnits(string text) => Math.Max(

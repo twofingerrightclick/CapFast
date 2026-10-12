@@ -38,15 +38,58 @@ internal static class ConfigurationChecks
                 var saved = new CaptionSettings(loadLocalConfiguration: false)
                 {
                     AudioDeviceId = "BlackHole2ch_UID", FontSize = 60, ReadingWordsPerMinute = 230,
+                    EnglishReadingWordsPerMinute = 200, SwahiliReadingWordsPerMinute = 160,
+                    FrenchReadingWordsPerMinute = 190, AutomaticCaptionCatchUp = false,
                     GeminiKey = "secret-must-not-be-saved"
                 };
                 CaptionPreferences.Save(saved, preferencesFile);
                 var reloaded = CaptionPreferences.Load(preferencesFile);
                 if (reloaded.AudioDeviceId != saved.AudioDeviceId || reloaded.FontSize != saved.FontSize
-                    || reloaded.ReadingWordsPerMinute != saved.ReadingWordsPerMinute)
+                    || reloaded.ReadingWordsPerMinute != saved.ReadingWordsPerMinute
+                    || reloaded.EnglishReadingWordsPerMinute != 200 || reloaded.SwahiliReadingWordsPerMinute != 160
+                    || reloaded.FrenchReadingWordsPerMinute != 190 || reloaded.AutomaticCaptionCatchUp)
                     throw new Exception("Audio input or caption display preferences did not survive reload.");
                 if (File.ReadAllText(preferencesFile).Contains(saved.GeminiKey))
                     throw new Exception("API key leaked into caption preferences.");
+                File.WriteAllText(preferencesFile,
+                    """{"audioDeviceId":"old-input","fontSize":52,"readingWordsPerMinute":210}""");
+                var legacy = CaptionPreferences.Load(preferencesFile);
+                if (legacy.AudioDeviceId != "old-input" || legacy.FontSize != 52 || legacy.ReadingWordsPerMinute != 210
+                    || legacy.EnglishReadingWordsPerMinute is not null || legacy.SwahiliReadingWordsPerMinute is not null
+                    || legacy.FrenchReadingWordsPerMinute is not null || !legacy.AutomaticCaptionCatchUp)
+                    throw new Exception("Older saved preferences lost shared settings or did not enable the new defaults.");
+                File.WriteAllText(preferencesFile,
+                    """{"audioDeviceId":"input","fontSize":48,"readingWordsPerMinute":210,"englishReadingWordsPerMinute":79,"swahiliReadingWordsPerMinute":301,"frenchReadingWordsPerMinute":null,"automaticCaptionCatchUp":false}""");
+                var invalidOverrides = CaptionPreferences.Load(preferencesFile);
+                if (invalidOverrides.ReadingWordsPerMinute != 210 || invalidOverrides.EnglishReadingWordsPerMinute is not null
+                    || invalidOverrides.SwahiliReadingWordsPerMinute is not null || invalidOverrides.FrenchReadingWordsPerMinute is not null
+                    || invalidOverrides.AutomaticCaptionCatchUp)
+                    throw new Exception("Invalid language overrides did not fall back independently to the shared speed.");
+                var speeds = new CaptionSettings(loadLocalConfiguration: false) { ReadingWordsPerMinute = 210 };
+                if (!speeds.AutomaticCaptionCatchUp || new[] { "en", "sw", "fr", "de", "auto", null }
+                    .Any(code => speeds.ReadingSpeedFor(code) != 210))
+                    throw new Exception("Default language reading speeds did not inherit the shared speed.");
+                speeds.EnglishReadingWordsPerMinute = 80;
+                speeds.SwahiliReadingWordsPerMinute = 300;
+                speeds.FrenchReadingWordsPerMinute = 190;
+                speeds.ReadingWordsPerMinute = 225;
+                if (speeds.ReadingSpeedFor("EN-us") != 80 || speeds.ReadingSpeedFor("sw_KE") != 300
+                    || speeds.ReadingSpeedFor("fr-FR") != 190 || speeds.ReadingSpeedFor(null) != 225)
+                    throw new Exception("Language override resolution or boundary validation failed.");
+                var copied = speeds.Copy();
+                speeds.EnglishReadingWordsPerMinute = 79;
+                speeds.SwahiliReadingWordsPerMinute = 301;
+                speeds.FrenchReadingWordsPerMinute = null;
+                if (speeds.EnglishReadingWordsPerMinute is not null || speeds.SwahiliReadingWordsPerMinute is not null
+                    || speeds.ReadingSpeedFor("en") != 225 || speeds.ReadingSpeedFor("fr") != 225
+                    || copied.ReadingSpeedFor("en") != 80 || copied.ReadingSpeedFor("sw") != 300
+                    || copied.ReadingSpeedFor("fr") != 190 || !copied.AutomaticCaptionCatchUp)
+                    throw new Exception("Invalid overrides or settings snapshots changed independent reading speeds.");
+                CaptionPreferences.Save(speeds, preferencesFile);
+                var inherited = CaptionPreferences.Load(preferencesFile);
+                if (inherited.EnglishReadingWordsPerMinute is not null || inherited.SwahiliReadingWordsPerMinute is not null
+                    || inherited.FrenchReadingWordsPerMinute is not null || !inherited.AutomaticCaptionCatchUp)
+                    throw new Exception("Inherited reading speeds or enabled catch-up did not survive reload.");
                 File.WriteAllText(preferencesFile, "{broken");
                 if (CaptionPreferences.Load(preferencesFile) != CaptionPreferences.Default)
                     throw new Exception("Invalid caption preferences did not use defaults.");

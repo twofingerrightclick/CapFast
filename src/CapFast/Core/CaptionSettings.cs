@@ -28,6 +28,34 @@ public sealed class CaptionSettings
     public string GeminiKey { get; set; } = "";
     public double FontSize { get; set; } = 48;
     public int ReadingWordsPerMinute { get; set; } = 180;
+    private int? _englishReadingWordsPerMinute;
+    private int? _swahiliReadingWordsPerMinute;
+    private int? _frenchReadingWordsPerMinute;
+    public int? EnglishReadingWordsPerMinute
+    {
+        get => _englishReadingWordsPerMinute;
+        set => _englishReadingWordsPerMinute = ValidReadingSpeedOverride(value);
+    }
+    public int? SwahiliReadingWordsPerMinute
+    {
+        get => _swahiliReadingWordsPerMinute;
+        set => _swahiliReadingWordsPerMinute = ValidReadingSpeedOverride(value);
+    }
+    public int? FrenchReadingWordsPerMinute
+    {
+        get => _frenchReadingWordsPerMinute;
+        set => _frenchReadingWordsPerMinute = ValidReadingSpeedOverride(value);
+    }
+    public bool AutomaticCaptionCatchUp { get; set; } = true;
+    public int ReadingSpeedFor(string? language) => (SpeechLanguageAssignment.Normalize(language) switch
+    {
+        "en" => EnglishReadingWordsPerMinute,
+        "sw" => SwahiliReadingWordsPerMinute,
+        "fr" => FrenchReadingWordsPerMinute,
+        _ => null
+    }) ?? ReadingWordsPerMinute;
+
+    internal static int? ValidReadingSpeedOverride(int? value) => value is >= 80 and <= 300 ? value : null;
     public string AudioDeviceId { get; set; } = "";
     public CaptionSettings Copy() => (CaptionSettings)MemberwiseClone();
 }

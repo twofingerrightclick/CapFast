@@ -57,6 +57,7 @@ public sealed class CaptionController
     public event Action? CaptionsFading;
     public event Action? LocalConfigurationLoaded;
     public Func<bool>? CanAcceptCaptions { get; set; }
+    public Func<string>? DisplayQueueStatus { get; set; }
     public Func<bool>? HasUnreadCaptions { get; set; }
     public void SettingsChanged()
     {

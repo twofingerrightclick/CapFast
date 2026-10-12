@@ -417,11 +417,12 @@ internal static class ControllerChecks
         var session = new FakeSession(); session.Started.SetResult();
         var controller = new CaptionController(new CaptionSettings(loadLocalConfiguration: false) { GeminiKey = "test" },
             _ => session, action => action(), clock);
-        var presentation = new CaptionPresentation { ReadingWordsPerMinute = 180 };
+        // This regression checks complete reading time when catch-up is disabled.
+        var presentation = new CaptionPresentation { ReadingWordsPerMinute = 180, CatchUpEnabled = false };
         presentation.Configure(24, 1, text => text.Length, "unread-inactivity");
         double Now() => (clock.GetUtcNow() - DateTimeOffset.UnixEpoch).TotalSeconds;
         controller.HasUnreadCaptions = () => presentation.HasUnreadCaptions(Now());
-        controller.CaptionReceived += update => presentation.Submit(update);
+        controller.CaptionReceived += update => presentation.Submit(update, Now());
         var fadedAt = -1d;
         controller.CaptionsFading += () => { fadedAt = Now(); presentation.Clear(); };
         controller.CaptionsCleared += presentation.Clear;

@@ -21,6 +21,9 @@ public sealed class SettingsWindow : Window
     private readonly TextBlock _googleDescription = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 };
     private readonly Slider _size = new() { Minimum = 28, Maximum = 72 };
     private readonly Slider _readingSpeed = new() { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true };
+    private readonly CheckBox _catchUp = new() { Content = "Automatic caption catch-up" };
+    private readonly TextBlock _displayQueue = new() { TextWrapping = TextWrapping.Wrap, FontSize = 13 };
+    private readonly DispatcherTimer _displayQueueTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
     private readonly TextBlock _readingLabel = new() { FontWeight = FontWeight.Medium };
     private readonly SelectableTextBlock _configurationPath = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .75 };
     private readonly TextBlock _notice = new() { TextWrapping = TextWrapping.Wrap, Opacity = .75 };
@@ -78,7 +81,15 @@ public sealed class SettingsWindow : Window
         _size.Value = controller.Settings.FontSize;
         _configurationPath.Text = controller.Settings.ConfigurationPath;
         _readingSpeed.Value = controller.Settings.ReadingWordsPerMinute;
-        _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
+        _readingLabel.Text = $"Default reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
+        _catchUp.IsChecked = controller.Settings.AutomaticCaptionCatchUp;
+        var languageSpeeds = new StackPanel { Spacing = 12 };
+        languageSpeeds.Children.Add(LanguageSpeedControl("English", () => controller.Settings.EnglishReadingWordsPerMinute,
+            value => controller.Settings.EnglishReadingWordsPerMinute = value));
+        languageSpeeds.Children.Add(LanguageSpeedControl("Swahili", () => controller.Settings.SwahiliReadingWordsPerMinute,
+            value => controller.Settings.SwahiliReadingWordsPerMinute = value));
+        languageSpeeds.Children.Add(LanguageSpeedControl("French", () => controller.Settings.FrenchReadingWordsPerMinute,
+            value => controller.Settings.FrenchReadingWordsPerMinute = value));
         var editGoogleKey = new Button { Content = "Edit Google API key" };
         editGoogleKey.Click += (_, _) => _gemini.IsVisible = !_gemini.IsVisible;
         _googlePanel = new StackPanel { Spacing = 8, Children = {
@@ -181,8 +192,9 @@ public sealed class SettingsWindow : Window
                 _configurationPath,
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } },
                 new Separator(),
-                _readingLabel, _readingSpeed,
-                new TextBlock { Text = "Text fills the window. This pace controls how soon older text can leave; a slower pace may delay captions behind the speaker.",
+                _readingLabel, _readingSpeed, languageSpeeds, _catchUp,
+                _displayQueue,
+                new TextBlock { Text = "Reading speeds control display pacing. Automatic caption catch-up temporarily speeds up a delayed column and may skip older queued text. Display wait excludes speech recognition and translation time.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 new TextBlock { Text = "Commands stay here while the audience window displays captions. F11 toggles display fullscreen; Esc exits fullscreen.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 }, close } } };
@@ -204,10 +216,19 @@ public sealed class SettingsWindow : Window
         {
             if (e.Property != Slider.ValueProperty) return;
             controller.Settings.ReadingWordsPerMinute = (int)Math.Round(_readingSpeed.Value);
-            _readingLabel.Text = $"Reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
+            _readingLabel.Text = $"Default reading speed: {controller.Settings.ReadingWordsPerMinute} words/minute";
             controller.SettingsChanged();
             SchedulePreferencesSave();
         };
+        _catchUp.IsCheckedChanged += (_, _) =>
+        {
+            controller.Settings.AutomaticCaptionCatchUp = _catchUp.IsChecked == true;
+            controller.SettingsChanged();
+            SchedulePreferencesSave();
+        };
+        void UpdateDisplayQueue() => _displayQueue.Text = controller.DisplayQueueStatus?.Invoke() ?? "Display queue is empty.";
+        _displayQueueTimer.Tick += (_, _) => UpdateDisplayQueue();
+        Opened += (_, _) => { UpdateDisplayQueue(); _displayQueueTimer.Start(); };
         KeyDown += (_, e) => { if (e.Key == Key.Escape) Close(); };
         controller.Changed += Refresh;
         controller.LocalConfigurationLoaded += RefreshLocalConfiguration;
@@ -222,6 +243,7 @@ public sealed class SettingsWindow : Window
         Closed += (_, _) =>
         {
             _preferencesSaveTimer.Stop();
+            _displayQueueTimer.Stop();
             SavePreferences();
             _closed = true;
             controller.Changed -= Refresh;
@@ -233,6 +255,31 @@ public sealed class SettingsWindow : Window
         _diagnostic.Text = controller.Settings.ConfigurationError ?? "";
         RefreshDiagnostics();
         Refresh();
+    }
+
+    private Control LanguageSpeedControl(string language, Func<int?> get, Action<int?> set)
+    {
+        var useDefault = new CheckBox { Content = $"{language}: use default speed", IsChecked = get() is null };
+        var speed = new Slider { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true,
+            Value = get() ?? _controller.Settings.ReadingWordsPerMinute, IsEnabled = get() is not null };
+        var label = new TextBlock { Text = $"{language}: {speed.Value:0} words/minute", IsVisible = get() is not null };
+        useDefault.IsCheckedChanged += (_, _) =>
+        {
+            var inherit = useDefault.IsChecked == true;
+            if (!inherit && get() is null) speed.Value = _controller.Settings.ReadingWordsPerMinute;
+            label.Text = $"{language}: {speed.Value:0} words/minute";
+            speed.IsEnabled = label.IsVisible = !inherit;
+            set(inherit ? null : (int)Math.Round(speed.Value));
+            _controller.SettingsChanged(); SchedulePreferencesSave();
+        };
+        speed.PropertyChanged += (_, e) =>
+        {
+            if (e.Property != Slider.ValueProperty || useDefault.IsChecked == true) return;
+            set((int)Math.Round(speed.Value));
+            label.Text = $"{language}: {speed.Value:0} words/minute";
+            _controller.SettingsChanged(); SchedulePreferencesSave();
+        };
+        return new StackPanel { Spacing = 6, Children = { useDefault, label, speed } };
     }
 
     private void RefreshLocalConfiguration()
