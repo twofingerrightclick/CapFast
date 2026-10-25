@@ -87,3 +87,19 @@ validation: test default/USB input and headphones, output selection, Listen/Stop
 rapid toggles, closing the dialog and app, permission denial, unplugging either
 endpoint, changing defaults, and running captions concurrently. Verify no sound
 continues after Stop and no delayed audio builds up during a prolonged sound check.
+
+### macOS monitoring startup regression
+
+On 2026-10-25, BlackHole input monitoring exited immediately with
+`MONITOR_DEVICE_CHANGED`, while transcription continued normally. Selecting the
+input delivered a delayed engine configuration notification after startup with
+the capture engine still running. The helper now compares the current device,
+format, and running state before stopping; it observes playback only when listening.
+Native monitor exit details are also recorded in Diagnostics.
+
+Validated in the signed Apple Silicon app with BlackHole 2ch input and MacBook Pro
+Speakers output: paused sound check, sustained level updates, Listen/Stop/restart,
+and user-confirmed audible monitoring. The full .NET checks passed. The shared
+checks do not reproduce CoreAudio notification timing; repeat this hardware test
+after native monitor changes. Device unplugging and format changes still need
+separate hardware validation.

@@ -214,10 +214,30 @@ if arguments.first == "--monitor" {
         do { try capture.start() } catch { fail("MIC_START_ERROR") }
         monitorStarted = true
         workerReady.signal()
-        // Device changes stop monitoring; never silently route listening elsewhere.
-        for audio in [capture, playback] {
+        // Device selection can deliver a delayed configuration notification after
+        // start(), even though the engine is running with the requested format.
+        // Compare the live route instead of mistaking that notification for removal.
+        // A real stop, format change, or reroute still ends this sound check.
+        func deviceID(_ node: AVAudioIONode) -> AudioDeviceID {
+            var id = AudioDeviceID(0)
+            var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            guard let unit = node.audioUnit,
+                  AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                       kAudioUnitScope_Global, 0, &id, &size) == noErr
+            else { fail("MONITOR_DEVICE_UNAVAILABLE") }
+            return id
+        }
+        for audio in listening ? [capture, playback] : [capture] {
+            let node: AVAudioIONode = audio === capture ? audio.inputNode : audio.outputNode
+            let expectedDevice = deviceID(node)
+            let expectedFormat = audio === capture ? node.outputFormat(forBus: 0) : node.inputFormat(forBus: 0)
             _ = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: audio, queue: nil) { _ in
-                fail("MONITOR_DEVICE_CHANGED")
+                // Engine inspection/teardown must not run on CoreAudio's callback queue.
+                DispatchQueue.main.async {
+                    let currentFormat = audio === capture ? node.outputFormat(forBus: 0) : node.inputFormat(forBus: 0)
+                    guard audio.isRunning, deviceID(node) == expectedDevice,
+                          currentFormat == expectedFormat else { fail("MONITOR_DEVICE_CHANGED") }
+                }
             }
         }
     }

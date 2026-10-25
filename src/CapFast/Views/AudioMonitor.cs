@@ -171,9 +171,11 @@ public sealed class AudioMonitor : IDisposable
             }
             await process.WaitForExitAsync();
             var code = await errors;
+            var exitCode = process.ExitCode;
             Dispatcher.UIThread.Post(() =>
             {
                 if (!ReferenceEquals(_process, process) || _disposed) return;
+                _controller.Errors.Add($"Mac audio monitor exited ({exitCode}): {code.Trim()}");
                 Stop(); _listening = false;
                 _configuration = $"{_controller.Settings.AudioDeviceId}\n{_output}\nFalse";
                 _error = code.Contains("PERMISSION") ? "Allow microphone access in System Settings → Privacy & Security → Microphone."
