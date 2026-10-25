@@ -27,7 +27,8 @@ public sealed class SettingsWindow : Window
     private readonly SelectableTextBlock _configurationPath = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .75 };
     private readonly TextBlock _notice = new() { TextWrapping = TextWrapping.Wrap, Opacity = .75 };
     private readonly StackPanel _googlePanel;
-    private readonly Button _demo = CommandRowButton("Preview sample captions");
+    private readonly Button _demo = new() { Content = "Preview sample captions", Padding = new Thickness(10, 5),
+        VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _pause = new() { Content = "▶ Start captions", HorizontalAlignment = HorizontalAlignment.Stretch,
         HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
         MinHeight = 72 };
@@ -185,29 +186,29 @@ public sealed class SettingsWindow : Window
         UpdateSource();
         var pacing = new Expander { Header = "Reading speed & pacing", HorizontalAlignment = HorizontalAlignment.Stretch,
             Content = new StackPanel { Spacing = 8, Children = {
-                _readingLabel, _readingSpeed, languageSpeeds, _catchUp,
+                _readingLabel, _readingSpeed, languageSpeeds, _catchUp, _displayQueue,
                 new TextBlock { Text = "Reading speeds control display pacing. Catch-up speeds up delayed columns and may skip older queued text.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 }
             } } };
         var audioMonitor = new AudioMonitor(controller, this);
-        var commands = new StackPanel { Spacing = 10, Children = {
+        var commands = new StackPanel { Spacing = 10, Margin = new Thickness(0, 0, 16, 0), Children = {
             Label("Transcription"), transcription, audioMonitor.View,
             new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), Children = {
                 _activity, PlaceInColumn(_sessionStatus, 1) } },
             _languageConsole, _languageStatus, _resetLanguages, _pause, _clear,
             Label("Caption size"), _size, pacing
         } };
+        var outputActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8,
+            Children = { _demo, _fullscreen } };
         var outputStatus = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12,
-            Children = { showing, PlaceInColumn(_fullscreen, 1) } };
+            Children = { showing, PlaceInColumn(outputActions, 1) } };
         ToolTip.SetTip(_fullscreen, "Toggle display fullscreen");
         Avalonia.Automation.AutomationProperties.SetName(_fullscreen, "Toggle display fullscreen");
         var output = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), RowSpacing = 10,
             Children = { outputStatus, livePreview, slideshow } };
         Grid.SetRow(livePreview, 1); Grid.SetRow(slideshow, 2);
-        var queue = new StackPanel { Spacing = 8, Children = { _displayQueue, _demo } };
-        var transcriptionColumn = new Grid { RowDefinitions = new RowDefinitions("*,Auto"), RowSpacing = 12,
-            Children = { new ScrollViewer { Content = commands, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }, queue } };
-        Grid.SetRow(queue, 1);
+        var transcriptionColumn = new ScrollViewer { Content = commands,
+            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled };
         var main = new Grid { ColumnDefinitions = new ColumnDefinitions("360,*"), ColumnSpacing = 28,
             Children = { transcriptionColumn, PlaceInColumn(output, 1) } };
         var configuration = new Expander { Header = "Audio, appearance & configuration", HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -224,7 +225,8 @@ public sealed class SettingsWindow : Window
         var secondary = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 28,
             Children = { configuration, PlaceInColumn(new Expander { Header = "Diagnostics", Content = diagnostics,
                 HorizontalAlignment = HorizontalAlignment.Stretch }, 1) } };
-        var footer = new StackPanel { Spacing = 12, Children = { new Separator(), secondary } };
+        var footer = new Border { Background = new SolidColorBrush(Color.Parse("#0FFFFFFF")),
+            Padding = new Thickness(12), Child = secondary };
         var layout = new Grid { Margin = new Thickness(24), RowDefinitions = new RowDefinitions("*,Auto"), RowSpacing = 18,
             Children = { main, footer } };
         Grid.SetRow(footer, 1);
