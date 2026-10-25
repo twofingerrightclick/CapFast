@@ -18,7 +18,10 @@ public static class SpeechAudioGateChecks
                 if (decision.EndStream) endings++;
             }
             var speechFixture = filename is "talk" or "early-30s" or "late-30s";
-            Check(speechFixture ? uploaded > 0 : uploaded == 0, "Unexpected approved audio in classifier fixture: " + filename);
+            if (speechFixture) Check(uploaded > 0, "No approved speech in fixture: " + filename);
+            if (filename is "silence" or "noise" or "tone")
+                Check(uploaded == 0, "Unexpected approved audio in quiet fixture: " + filename);
+            // Music fixtures are observational: operators now pause capture manually.
             Console.WriteLine($"{filename}: {bytes.Length / 3201 / 10d:F1}s classified, {uploaded / 10d:F1}s approved, {endings} stream endings.");
         }
     }
@@ -38,22 +41,6 @@ public static class SpeechAudioGateChecks
         var accepted = gate.Process(Frame(19), AudioFrameKind.Speech);
         Check(accepted.Audio.Count == 20 && accepted.Audio.Select(frame => frame[0]).SequenceEqual(Enumerable.Range(0, 20).Select(i => (byte)i)),
             "Qualification discarded or reordered the opening speech.");
-        var music = gate.Process(Frame(20), AudioFrameKind.Music);
-        Check(music.Audio.Count == 0 && music.EndStream && music.Activity == AudioActivity.Music && !gate.IsOpen,
-            "Music was uploaded or failed to close qualified speech immediately.");
-        Check(!gate.Process(Frame(20), AudioFrameKind.Music).EndStream, "Music repeatedly ended an already closed stream.");
-        var manualMusicGate = new SpeechAudioGate(rejectMusic: false);
-        for (var i = 0; i < 19; i++)
-            Check(manualMusicGate.Process(Frame(i), AudioFrameKind.Music).Audio.Count == 0,
-                "Music-labeled audio uploaded before two seconds with music rejection off.");
-        var manualMusic = manualMusicGate.Process(Frame(19), AudioFrameKind.Music);
-        Check(manualMusic.Audio.Count == 20 && manualMusic.Activity == AudioActivity.Speech && !manualMusic.EndStream,
-            "Music-labeled speech did not qualify when music rejection was off.");
-        Check(manualMusicGate.Process(Frame(20), AudioFrameKind.Music).Audio.Count == 1,
-            "Music-labeled speech stopped streaming when music rejection was off.");
-        for (var i = 0; i < 19; i++) gate.Process(Frame(i), AudioFrameKind.Speech);
-        gate.Process(Frame(0), AudioFrameKind.Music);
-        Check(gate.Process(Frame(0), AudioFrameKind.Speech).Audio.Count == 0, "Music retained the pre-qualification speech candidate.");
         gate.Reset();
         for (var i = 0; i < 10; i++) gate.Process(Frame(i), AudioFrameKind.Speech);
         for (var i = 0; i < 3; i++) gate.Process(Frame(100), AudioFrameKind.Quiet);
@@ -69,7 +56,7 @@ public static class SpeechAudioGateChecks
         Check(gate.Process(Frame(0), AudioFrameKind.Speech).Audio.Count == 0, "Separate short utterances combined across a long pause.");
         try { gate.Process(new byte[1], AudioFrameKind.Speech); throw new Exception("Malformed frame accepted."); }
         catch (InvalidDataException) { }
-        Console.WriteLine("Speech gate checks passed: silence, two-second qualification, opening audio, music veto, short pauses, stream end, and bounds.");
+        Console.WriteLine("Speech gate checks passed: silence, two-second qualification, opening audio, short pauses, stream end, and bounds.");
     }
     private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }
 }

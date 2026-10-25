@@ -58,7 +58,7 @@ public sealed class App : Application
                 SwahiliReadingWordsPerMinute = saved.SwahiliReadingWordsPerMinute,
                 FrenchReadingWordsPerMinute = saved.FrenchReadingWordsPerMinute,
                 AutomaticCaptionCatchUp = saved.AutomaticCaptionCatchUp
-            }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId, settings.RejectMusic),
+            }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId),
                 action => Dispatcher.UIThread.Post(action));
             _controller.Changed += ApplyAppearance;
             _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>
@@ -126,7 +126,7 @@ public sealed class App : Application
         if (_controller is null || _captions is null) return;
         if (_settings is null)
         {
-            _settings = new SettingsWindow(_controller) { ToggleDisplayFullscreen = _captions.ToggleFullscreen };
+            _settings = new SettingsWindow(_controller, _captions) { ToggleDisplayFullscreen = _captions.ToggleFullscreen };
             _settings.Closed += (_, _) => { _settings = null; _captions.Focus(); };
             InstallSettingsShortcut(_settings);
             _settings.Show(_captions);

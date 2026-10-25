@@ -26,11 +26,8 @@ public static class LanguageAssignmentRegressionChecks
         var originalAudioGeneration = pipeline.AudioGeneration;
         pipeline.TryAcceptTranscript(new("old", "Old.", true, SourceLanguage: "en"), 0);
         await oldEntered.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        var permissiveGate = new SpeechAudioGate(rejectMusic: false);
-        Check(permissiveGate.Process(new byte[3200], AudioFrameKind.Music).Activity == AudioActivity.Speech,
-            "Fixture must exercise music coerced to speech by permissive audio gate.");
-        pipeline.ObserveAudio(AudioActivity.Music, 5);
-        Check(pipeline.Assignment is null, "Raw music must expire assignment even with reject-music disabled.");
+        pipeline.ObserveAudio(AudioActivity.Idle, 5);
+        Check(pipeline.Assignment is null, "Silence must expire the language assignment.");
         pipeline.TryAcceptTranscript(new("late-unseen", "Late.", true, SourceLanguage: "en"), 6);
         Check(pipeline.Assignment is null, "Late final resurrected an expired audio block.");
         pipeline.ObserveAudio(AudioActivity.Speech, 7);

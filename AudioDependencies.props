@@ -1,0 +1,10 @@
+<Project>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.23.2" />
+    <PackageReference Include="NAudio.Wasapi" Version="3.3.0" />
+    <Content Include="$(MSBuildThisFileDirectory)third_party/silero-vad/silero_vad.onnx" Link="Models/silero_vad.onnx" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(MSBuildThisFileDirectory)third_party/silero-vad/LICENSE" Link="third_party/silero-vad/LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(MSBuildThisFileDirectory)third_party/onnxruntime/*" Link="third_party/onnxruntime/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="$(MSBuildThisFileDirectory)third_party/naudio/*" Link="third_party/naudio/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

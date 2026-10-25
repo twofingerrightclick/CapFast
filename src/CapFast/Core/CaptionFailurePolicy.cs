@@ -18,11 +18,15 @@ public static class CaptionFailurePolicy
         message.Contains("HTTP 403", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("HTTP 429", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("permission", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("selected audio input stopped", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("selected Windows audio input", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("audio capture could not", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("supports macOS and Windows only", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("selected Mac audio input", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("selected audio input is unavailable", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("unsupported audio format", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("Mac audio capture could not start", StringComparison.OrdinalIgnoreCase) ||
-        message.Contains("speech and music classification is unavailable", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("speech classification is unavailable", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("speech classification returned an invalid frame", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("audio helper is missing", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("supports macOS only", StringComparison.OrdinalIgnoreCase) ||

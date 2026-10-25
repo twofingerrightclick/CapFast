@@ -21,6 +21,7 @@ public sealed class CaptionWindow : Window
     private readonly Grid _columns;
     private readonly Grid _frenchColumn;
     private readonly Grid _stage;
+    private readonly SlideSurface _slide = new() { IsVisible = false };
     private bool _allowClose;
     private bool _closing;
     public Action? OpenSettings { get; set; }
@@ -42,7 +43,7 @@ public sealed class CaptionWindow : Window
         _columns = new Grid { ColumnDefinitions = new ColumnDefinitions("*,1,*"),
             Children = { englishColumn, _divider, _frenchColumn } };
         Grid.SetColumn(_divider, 1); Grid.SetColumn(_frenchColumn, 2);
-        _stage = new Grid { Children = { _columns } };
+        _stage = new Grid { Children = { _columns, _slide } };
         _stage.SizeChanged += (_, _) => FitCaption();
         Content = _stage;
         ActualThemeVariantChanged += (_, _) => ApplyTheme();
@@ -51,15 +52,15 @@ public sealed class CaptionWindow : Window
         AddHandler(KeyDownEvent, HandleKeyDown, RoutingStrategies.Tunnel);
         Opened += (_, _) => Focus();
         _controller.Changed += Refresh;
+        _controller.Slideshow.Changed += RefreshSlideshow;
         _controller.CaptionReceived += ReceiveCaption;
-        _controller.LanguageAssignmentChanged += ApplyLanguages;
         _controller.CaptionsCleared += ClearCaption;
         _controller.CaptionsFading += FadeCaption;
         _controller.CanAcceptCaptions = () => _englishCaptions.CanAcceptCaptions && _frenchCaptions.CanAcceptCaptions;
-        _controller.DisplayQueueStatus = () => $"English / Swahili: {_englishCaptions.QueueStatus}\nFrench: {_frenchCaptions.QueueStatus}";
+        _controller.DisplayQueueStatus = () => $"{_englishLabel.Text}: {_englishCaptions.QueueStatus}\n{_frenchLabel.Text}: {_frenchCaptions.QueueStatus}";
         _controller.HasUnreadCaptions = () => _englishCaptions.HasUnreadCaptions || _frenchCaptions.HasUnreadCaptions;
         Closed += (_, _) => { _controller.Changed -= Refresh; _controller.CaptionReceived -= ReceiveCaption;
-            _controller.LanguageAssignmentChanged -= ApplyLanguages;
+            _controller.Slideshow.Changed -= RefreshSlideshow;
             _controller.CaptionsFading -= FadeCaption;
             _controller.CaptionsCleared -= ClearCaption; _controller.CanAcceptCaptions = null;
             _controller.HasUnreadCaptions = null; _controller.DisplayQueueStatus = null;
@@ -76,12 +77,21 @@ public sealed class CaptionWindow : Window
             Close();
         };
         Refresh();
+        RefreshSlideshow();
+    }
+
+    private void RefreshSlideshow()
+    {
+        _slide.Show(_controller.Slideshow.Current);
+        _slide.IsVisible = _controller.Slideshow.IsShowing;
+        // Keep the caption surfaces laid out and pacing while the opaque slide covers them.
     }
 
     private void ApplyTheme()
     {
         var light = ActualThemeVariant == ThemeVariant.Light;
         Background = light ? Brushes.White : Brushes.Black;
+        _columns.Background = Background;
         var captionColor = light ? Color.Parse("#171717") : Colors.White;
         var foreground = new SolidColorBrush(captionColor);
         Foreground = foreground;
@@ -108,10 +118,6 @@ public sealed class CaptionWindow : Window
         FitCaption();
     }
 
-    private void ApplyLanguages(LanguageAssignment? assignment)
-    {
-        ApplyRouting(_languages.Apply(assignment));
-    }
     private void ApplyRouting((bool ClearFirst, bool ClearSecond) clears)
     {
         if (clears.ClearFirst) _englishCaptions.ClearCaption();
@@ -126,8 +132,7 @@ public sealed class CaptionWindow : Window
         {
             if (update.PrimaryLanguage is { } primary && update.SecondaryLanguage is { } secondary)
             {
-                if (update.IsSpeechBlockDrain)
-                    ApplyRouting(_languages.ApplyDrain(new(update.SourceLanguage!, primary, secondary, update.AssignmentEpoch)));
+                ApplyRouting(_languages.Apply(new(update.SourceLanguage!, primary, secondary, update.AssignmentEpoch)));
                 bool Submit(string code, string text)
                 {
                     var slot = _languages.Slot(code);
@@ -164,6 +169,8 @@ public sealed class CaptionWindow : Window
         _englishCaptions.Configure(_controller.Settings);
         _frenchCaptions.Configure(_controller.Settings);
     }
+
+    internal AudiencePreview CreatePreview(bool transcriptionOnly) => new(transcriptionOnly ? _columns : _stage);
 
     public void ToggleFullscreen() => WindowState = WindowState == WindowState.FullScreen ? WindowState.Normal : WindowState.FullScreen;
 }

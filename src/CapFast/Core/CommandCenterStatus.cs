@@ -15,8 +15,6 @@ public static class CommandCenterStatus
             "Current state: listening locally. Google connects when speech resumes.",
         _ when activity == AudioActivity.Speech =>
             "Current state: live. Speech activity detected; a caption may follow.",
-        _ when activity == AudioActivity.Music =>
-            "Current state: live. Music activity detected.",
         _ => "Current state: live and listening. Captions appear after accepted speech and translation."
     };
 }

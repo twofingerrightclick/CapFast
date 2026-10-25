@@ -1,5 +1,7 @@
 # Swahili caption testing
 
+For the current Silero detector and speech gate, start with [local sample-audio validation](local-speech-validation.md). It indexes the available recordings and provides a repeatable offline sweep; the cloud and display tests below are separate.
+
 Test translation first, then speech recognition and caption timing. The pack contains 12 parallel Swahili/English text pairs and a 157.16-second audio playlist. The audio hashes and RIFF durations were independently verified; recordings are mono 16 kHz float32 WAV.
 
 ## Text translation comparison
@@ -59,16 +61,16 @@ dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --o
 
 Output directories must be new. Without `--run`, audio validation performs no requests. `--clip-id 1581` selects one clip. `--normalize-audio` optionally raises/lowers the derived float samples to peak 0.8 before conversion; it preserves originals and is a diagnostic option, not an app feature. Some pack clips are very quiet (about −66 dBFS RMS), which can cause omissions in both models. Raw and amplified results must be reported separately.
 
-For the supplied talk, [the extraction manifest](../sampleTalk/extracted/manifest.json) records the original file, MP3, sample offsets, levels, and exact commands. The three 30-second samples start at 0:30, 6:33, and 11:37. The supplied Swahili transcript is untimed and there is no aligned English reference.
+For the supplied talk, [the extraction manifest](../sampleTalk/swa-extracted/manifest.json) records the original file, MP3, sample offsets, levels, and exact commands. The three 30-second samples start at 0:30, 6:33, and 11:37. The supplied Swahili transcript is untimed and there is no aligned English reference.
 
 ```sh
-dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --manifest sampleTalk/extracted/manifest.json --output artifacts/my-talk-test
+dotnet tools/CapFast.AudioEval/bin/Debug/net10.0/CapFast.AudioEval.dll --run --manifest sampleTalk/swa-extracted/manifest.json --output artifacts/my-talk-test
 ```
 
 To play a sample into BlackHole without changing the Mac's default output, the optional local Swift helper is `artifacts/PlayToDevice` (source: `tools/PlayToDevice.swift`). After starting CapFast with BlackHole selected:
 
 ```sh
-artifacts/PlayToDevice --play sampleTalk/extracted/middle-30s.wav BlackHole2ch_UID
+artifacts/PlayToDevice --play sampleTalk/swa-extracted/middle-30s.wav BlackHole2ch_UID
 ```
 
 The bundled app was tested through BlackHole with clip 1570: it displayed “It also had no authority to override interstate laws and tariff schedules.” Space then paused capture while retaining the caption. Longer seminar use and automatic reconnection are still unvalidated; Transcribe Live currently requires a restart at its session limit of up to 10 minutes.

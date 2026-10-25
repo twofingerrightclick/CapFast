@@ -30,4 +30,10 @@
     <Compile Include="../../src/CapFast/Speech/ILanguageAssignmentSession.cs" Link="ILanguageAssignmentSession.cs" />
     <Compile Include="../../src/CapFast/Core/TranscriptLanguageResolver.cs" Link="TranscriptLanguageResolver.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../src/CapFast/Speech/SileroSpeechDetector.cs" Link="SileroSpeechDetector.cs" />
+    <Compile Include="../../src/CapFast/Speech/PcmSpeechFramer.cs" Link="PcmSpeechFramer.cs" />
+    <Compile Include="../../src/CapFast/Speech/WindowsAudioCapture.cs" Link="WindowsAudioCapture.cs" />
+  </ItemGroup>
+  <Import Project="../../AudioDependencies.props" />
 </Project>

@@ -17,7 +17,6 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _lightMode = new() { Content = "Light mode" };
     private readonly StackPanel _configuration;
     private readonly TextBox _gemini = new() { IsVisible = false, PasswordChar = '●' };
-    private readonly CheckBox _rejectMusic = new() { Content = "Reject detected music and singing" };
     private readonly TextBlock _googleDescription = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 };
     private readonly Slider _size = new() { Minimum = 28, Maximum = 72 };
     private readonly Slider _readingSpeed = new() { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true };
@@ -33,12 +32,13 @@ public sealed class SettingsWindow : Window
         HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
         MinHeight = 72 };
     private readonly Button _resetLanguages = CommandRowButton("Reset output languages");
-    private readonly Grid _commandRow = new() { ColumnDefinitions = new ColumnDefinitions("*,*,*"), ColumnSpacing = 8 };
+
     private readonly StackPanel _languageConsole = new() { Orientation = Orientation.Horizontal, Spacing = 8 };
     private readonly Dictionary<string, Button> _languageButtons = new();
     private readonly TextBlock _languageStatus = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
     private readonly Button _clear = new() { Content = "Clear captions" };
-    private readonly Button _fullscreen = CommandRowButton("Toggle display fullscreen");
+    private readonly Button _fullscreen = new() { Content = "Fullscreen", Padding = new Thickness(10, 5),
+        VerticalAlignment = VerticalAlignment.Center };
     private readonly ComboBox _audio = new() { MinWidth = 250 };
     private readonly Button _refreshAudio = new() { Content = "Refresh inputs" };
     private readonly TextBlock _audioAvailability = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
@@ -70,14 +70,13 @@ public sealed class SettingsWindow : Window
     private CancellationTokenSource? _microphoneCheck;
     public Action? ToggleDisplayFullscreen { get; set; }
 
-    public SettingsWindow(CaptionController controller)
+    public SettingsWindow(CaptionController controller, CaptionWindow audience)
     {
         _controller = controller;
         Title = "CapFast — Settings";
-        Width = 600; Height = 760; MinWidth = 440; MinHeight = 480;
+        Width = 1400; Height = 940; MinWidth = 1050; MinHeight = 740;
         _lightMode.IsChecked = controller.Settings.Appearance == AppAppearance.Light;
         _gemini.Text = controller.Settings.GeminiKey;
-        _rejectMusic.IsChecked = controller.Settings.RejectMusic;
         _size.Value = controller.Settings.FontSize;
         _configurationPath.Text = controller.Settings.ConfigurationPath;
         _readingSpeed.Value = controller.Settings.ReadingWordsPerMinute;
@@ -93,17 +92,15 @@ public sealed class SettingsWindow : Window
         var editGoogleKey = new Button { Content = "Edit Google API key" };
         editGoogleKey.Click += (_, _) => _gemini.IsVisible = !_gemini.IsVisible;
         _googlePanel = new StackPanel { Spacing = 8, Children = {
-            Label("Automatic transcription → two output languages"), _googleDescription, _rejectMusic,
-            new TextBlock { Text = "Off by default. Music-labeled audio can be captioned; pause manually when music plays. Change this while paused.",
+            Label("Automatic transcription → two output languages"), _googleDescription,
+            new TextBlock { Text = "Pause captions when music plays. Resume when speech begins.",
                 TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
             Label("Gemini API key"), editGoogleKey, _gemini } };
         _configuration = new StackPanel { Spacing = 14, Children = { _googlePanel } };
-        var close = new Button { Content = "Done", HorizontalAlignment = HorizontalAlignment.Right };
-        close.Click += (_, _) => Close();
         foreach (var code in new[] { "en", "sw", "fr" })
         {
             var language = code;
-            var button = new Button { MinWidth = 110, Padding = new Thickness(10, 8), HorizontalContentAlignment = HorizontalAlignment.Left };
+            var button = new Button { MinWidth = 0, Padding = new Thickness(8, 8), HorizontalContentAlignment = HorizontalAlignment.Left };
             button.Click += (_, _) => controller.HintInputLanguage(button.Tag as string ?? language);
             _languageButtons.Add(code, button); _languageConsole.Children.Add(button);
         }
@@ -155,19 +152,6 @@ public sealed class SettingsWindow : Window
             UpdateAudioAvailability();
         };
         _refreshAudio.Click += async (_, _) => await RefreshAudioAsync();
-        _commandRow.Children.Add(PlaceInColumn(_resetLanguages, 0));
-        _commandRow.Children.Add(PlaceInColumn(_demo, 1));
-        _commandRow.Children.Add(PlaceInColumn(_fullscreen, 2));
-        var commands = new StackPanel { Spacing = 10, Children =
-        {
-            Label("Commands"),
-            new Grid { MinHeight = 96, ColumnDefinitions = new ColumnDefinitions("Auto,*"), Children =
-            {
-                _activity,
-                PlaceInColumn(_sessionStatus, 1)
-            } },
-            _languageConsole, _languageStatus, _pause, _clear, _commandRow
-        } };
         var clearHistory = new Button { Content = "Clear diagnostic history", HorizontalAlignment = HorizontalAlignment.Right };
         clearHistory.Click += (_, _) => { _controller.Errors.Clear(); _controller.Events.Clear(); };
         var diagnostics = new StackPanel { Spacing = 8, Children =
@@ -179,31 +163,81 @@ public sealed class SettingsWindow : Window
             new ScrollViewer { Height = 155, Content = _diagnosticHistory },
             clearHistory
         } };
-        Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(28), Spacing = 18,
-            Children = { commands, diagnostics,
-                Label("Caption size"), _size,
-                new Separator(), Label("Audio input"),
+        var slideshow = new SlideshowControls(controller.Slideshow);
+        var transcriptionPreview = audience.CreatePreview(transcriptionOnly: true);
+        var livePreview = audience.CreatePreview(transcriptionOnly: false);
+        var transcription = new Button
+        {
+            Content = transcriptionPreview, Padding = new Thickness(3), BorderThickness = new Thickness(2),
+            HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Height = 190
+        };
+        Avalonia.Automation.AutomationProperties.SetName(transcription, "Show transcription on audience screen");
+        ToolTip.SetTip(transcription, "Click to show transcription · Enter or Space when focused");
+        transcription.Click += (_, _) => controller.Slideshow.SetShowing(false);
+        var showing = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeight.Medium };
+        void UpdateSource()
+        {
+            SlideshowControls.SetOutputState(transcription, "Transcription", !controller.Slideshow.IsShowing);
+            showing.Text = controller.Slideshow.IsShowing ? "Live output (Slideshow)" : "Live output (Transcription)";
+        }
+        controller.Slideshow.Changed += UpdateSource;
+        UpdateSource();
+        var pacing = new Expander { Header = "Reading speed & pacing", HorizontalAlignment = HorizontalAlignment.Stretch,
+            Content = new StackPanel { Spacing = 8, Children = {
+                _readingLabel, _readingSpeed, languageSpeeds, _catchUp,
+                new TextBlock { Text = "Reading speeds control display pacing. Catch-up speeds up delayed columns and may skip older queued text.",
+                    TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 }
+            } } };
+        var audioMonitor = new AudioMonitor(controller, this);
+        var commands = new StackPanel { Spacing = 10, Children = {
+            Label("Transcription"), transcription, audioMonitor.View,
+            new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), Children = {
+                _activity, PlaceInColumn(_sessionStatus, 1) } },
+            _languageConsole, _languageStatus, _resetLanguages, _pause, _clear,
+            Label("Caption size"), _size, pacing
+        } };
+        var outputStatus = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12,
+            Children = { showing, PlaceInColumn(_fullscreen, 1) } };
+        ToolTip.SetTip(_fullscreen, "Toggle display fullscreen");
+        Avalonia.Automation.AutomationProperties.SetName(_fullscreen, "Toggle display fullscreen");
+        var output = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), RowSpacing = 10,
+            Children = { outputStatus, livePreview, slideshow } };
+        Grid.SetRow(livePreview, 1); Grid.SetRow(slideshow, 2);
+        var queue = new StackPanel { Spacing = 8, Children = { _displayQueue, _demo } };
+        var transcriptionColumn = new Grid { RowDefinitions = new RowDefinitions("*,Auto"), RowSpacing = 12,
+            Children = { new ScrollViewer { Content = commands, HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled }, queue } };
+        Grid.SetRow(queue, 1);
+        var main = new Grid { ColumnDefinitions = new ColumnDefinitions("360,*"), ColumnSpacing = 28,
+            Children = { transcriptionColumn, PlaceInColumn(output, 1) } };
+        var configuration = new Expander { Header = "Audio, appearance & configuration", HorizontalAlignment = HorizontalAlignment.Stretch,
+            Content = new StackPanel { Spacing = 12, Children = {
+                Label("Audio input"),
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _audio, _refreshAudio } },
-                _audioAvailability, _microphone,
-                Label("Appearance"), _lightMode,
+                _audioAvailability, _microphone, Label("Appearance"), _lightMode,
                 _notice, _configuration,
                 new TextBlock { Text = "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 _configurationPath,
-                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } },
-                new Separator(),
-                _readingLabel, _readingSpeed, languageSpeeds, _catchUp,
-                _displayQueue,
-                new TextBlock { Text = "Reading speeds control display pacing. Automatic caption catch-up temporarily speeds up a delayed column and may skip older queued text. Display wait excludes speech recognition and translation time.",
-                    TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
-                new TextBlock { Text = "Commands stay here while the audience window displays captions. F11 toggles display fullscreen; Esc exits fullscreen.",
-                    TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 }, close } } };
+                new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } }
+            } } };
+        var secondary = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*"), ColumnSpacing = 28,
+            Children = { configuration, PlaceInColumn(new Expander { Header = "Diagnostics", Content = diagnostics,
+                HorizontalAlignment = HorizontalAlignment.Stretch }, 1) } };
+        var footer = new StackPanel { Spacing = 12, Children = { new Separator(), secondary } };
+        var layout = new Grid { Margin = new Thickness(24), RowDefinitions = new RowDefinitions("*,Auto"), RowSpacing = 18,
+            Children = { main, footer } };
+        Grid.SetRow(footer, 1);
+        // Expanded configuration remains scrollable without squeezing the daily controls away.
+        var configurationContent = configuration.Content;
+        configuration.Content = null;
+        configuration.Content = new ScrollViewer { MaxHeight = 300, Content = configurationContent };
+        Content = layout;
         _lightMode.IsCheckedChanged += (_, _) =>
         {
             controller.Settings.Appearance = _lightMode.IsChecked == true ? AppAppearance.Light : AppAppearance.Dark;
             controller.SettingsChanged();
         };
-        _rejectMusic.IsCheckedChanged += (_, _) => Save();
         _gemini.TextChanged += (_, _) => Save();
         _size.PropertyChanged += (_, e) =>
         {
@@ -242,6 +276,10 @@ public sealed class SettingsWindow : Window
         Opened += async (_, _) => await RefreshAudioAsync();
         Closed += (_, _) =>
         {
+            audioMonitor.Dispose();
+            slideshow.Dispose();
+            transcriptionPreview.Dispose(); livePreview.Dispose();
+            controller.Slideshow.Changed -= UpdateSource;
             _preferencesSaveTimer.Stop();
             _displayQueueTimer.Stop();
             SavePreferences();
@@ -448,7 +486,7 @@ public sealed class SettingsWindow : Window
         Refresh();
         try
         {
-            var inputs = (await MacAudioInputs.ListAsync()).ToList();
+            var inputs = (await AudioDevices.ListInputsAsync()).ToList();
             if (_closed) return;
             _updatingAudio = true;
             var selected = inputs.FirstOrDefault(input => input.Id == _controller.Settings.AudioDeviceId);
@@ -518,7 +556,6 @@ public sealed class SettingsWindow : Window
     {
         if (_loading || !_controller.IsPaused) return;
         var settings = _controller.Settings;
-        settings.RejectMusic = _rejectMusic.IsChecked == true;
         settings.GeminiKey = _gemini.Text ?? "";
         _controller.SettingsChanged();
     }
@@ -534,11 +571,9 @@ public sealed class SettingsWindow : Window
         _demo.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _audio.IsEnabled = _controller.IsPaused && !_listingAudio;
         if (!_controller.IsPaused && !_updatingAudio) RestoreAudioSelection();
-        _activity.Text = _controller.AudioActivity == AudioActivity.Music && _controller.State == CaptionState.Live ? "♫"
-            : _controller.AudioActivity == AudioActivity.Speech && _controller.State == CaptionState.Live ? "•••" : "·";
+        _activity.Text = _controller.AudioActivity == AudioActivity.Speech && _controller.State == CaptionState.Live ? "•••" : "·";
         Avalonia.Automation.AutomationProperties.SetName(_activity,
-            _controller.AudioActivity == AudioActivity.Music && _controller.State == CaptionState.Live ? "Music detected"
-            : _controller.State == CaptionState.Live ? (_controller.AudioActivity == AudioActivity.Speech ? "Speech detected" : "Listening — no speech") : "Transcription paused");
+            _controller.State == CaptionState.Live ? (_controller.AudioActivity == AudioActivity.Speech ? "Speech detected" : "Listening — no speech") : "Transcription paused");
         _sessionStatus.Text = _controller.State == CaptionState.Live
             ? $"{LanguageSurfaceRouting.Status(_controller.LanguageAssignment)} · {_controller.Status}" : _controller.Status;
         _diagnosticState.Text = CommandCenterStatus.Describe(_controller.State, _controller.AudioActivity, _controller.Status);

@@ -24,7 +24,6 @@ public sealed class CaptionSettings
         IsLoadingConfiguration = false;
     }
     public AppAppearance Appearance { get; set; } = AppAppearance.Dark;
-    public bool RejectMusic { get; set; }
     public string GeminiKey { get; set; } = "";
     public double FontSize { get; set; } = 48;
     public int ReadingWordsPerMinute { get; set; } = 180;

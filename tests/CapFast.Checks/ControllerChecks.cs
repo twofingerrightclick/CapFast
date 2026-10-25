@@ -7,6 +7,13 @@ internal static class ControllerChecks
     {
         await CheckUnreadInactivityAsync(burst: false);
         await CheckUnreadInactivityAsync(burst: true);
+        var demo = new CaptionController(new CaptionSettings(), _ => throw new Exception("Demo opened a capture session"), a => a());
+        var demoTask = demo.RunDemoAsync();
+        Require(demo.State == CaptionState.Live && !demo.HasActiveAudioSession,
+            "Sample captions enabled automatic microphone monitoring");
+        await demo.PauseAsync();
+        await demoTask;
+        await demo.ShutdownAsync();
         var dispatch = new Queue<Action>();
         var assignmentSession = new AssignmentSession();
         var assignmentController = new CaptionController(new CaptionSettings { GeminiKey = "test" }, _ => assignmentSession, dispatch.Enqueue);
@@ -45,15 +52,15 @@ internal static class ControllerChecks
         Require(log.Entries.Count == 3 && log.Entries[0].Message == "2", "Log did not evict oldest entries");
         log.Clear(); Require(log.Entries.Count == 0, "Log clear failed");
         var sessions = new List<FakeSession>();
-        var settings = new CaptionSettings { GeminiKey = "test", AudioDeviceId = "device-one", RejectMusic = false };
+        var settings = new CaptionSettings { GeminiKey = "test", AudioDeviceId = "device-one" };
         var controller = new CaptionController(settings, snapshot =>
         {
             Require(snapshot.AudioDeviceId == "device-one", "Selected audio source lost");
-            Require(!snapshot.RejectMusic, "Disabled music rejection did not reach the session factory");
             var session = new FakeSession(); sessions.Add(session); return session;
         }, action => action());
         Require(controller.IsPaused && sessions.Count == 0, "Startup must be paused");
         var start = controller.ToggleAsync();
+        Require(!controller.HasActiveAudioSession, "Connecting enabled automatic monitoring before capture started");
         var pause = controller.ToggleAsync();
         sessions[0].Emit("stale");
         sessions[0].Started.SetResult();
@@ -61,8 +68,10 @@ internal static class ControllerChecks
         Require(controller.IsPaused && sessions[0].Disposed && controller.Text == "", "Pause during start failed");
         Require(controller.CaptionUtteranceId is null, "Stale caption changed display identity");
         start = controller.ToggleAsync(); sessions[1].Started.SetResult(); await start;
+        Require(controller.HasActiveAudioSession, "Live capture did not enable automatic monitoring");
         sessions[1].Emit("Keep these captions");
         await controller.PauseAsync();
+        Require(!controller.HasActiveAudioSession, "Paused capture retained automatic monitoring");
         sessions[1].Emit("stale");
         Require(controller.IsPaused && controller.Text == "Keep these captions", "Pause changed captions or accepted stale callback");
         controller.SettingsChanged();
@@ -147,7 +156,7 @@ internal static class ControllerChecks
                 CaptionFailurePolicy.RequiresOperatorAction("The selected audio input is unavailable. Choose another input in Settings and start again.") &&
                 CaptionFailurePolicy.RequiresOperatorAction("The selected audio input has an unsupported audio format. Choose another input in Settings and start again.") &&
                 CaptionFailurePolicy.RequiresOperatorAction("Mac audio capture could not start. Check the selected input and close other apps holding the device.") &&
-                CaptionFailurePolicy.RequiresOperatorAction("Mac speech and music classification is unavailable. Capture stopped without uploading unclassified audio. Relaunch the packaged app.") &&
+                CaptionFailurePolicy.RequiresOperatorAction("Mac speech classification is unavailable. Capture stopped without uploading unclassified audio. Relaunch the packaged app.") &&
                 CaptionFailurePolicy.RequiresOperatorAction("Mac speech classification returned an invalid frame. Capture stopped; restart the packaged app.") &&
                 !CaptionFailurePolicy.RequiresOperatorAction("Gemini connected, but the startup deadline expired before audio capture began. Check the connection and service availability.") &&
                 !CaptionFailurePolicy.RequiresOperatorAction("Gemini closed the session with an internal server error (WebSocket 1011)."),
@@ -265,31 +274,23 @@ internal static class ControllerChecks
         Require(gated.IsPaused && gatedStarts == 0 && gated.Status.Contains("reading fell behind"), "Early resume started capture with a full display backlog");
         await gated.RunDemoAsync();
         Require(gated.IsPaused && gated.CaptionUtteranceId is null, "Demo bypassed the reading backlog guard");
-        var clock = new ManualClock();
-        var musicSession = new FakeSession(); musicSession.Started.SetResult();
-        var musicController = new CaptionController(settings, _ => musicSession, a => a(), clock);
-        var musicClears = 0;
-        musicController.CaptionsFading += () => musicClears++;
-        await musicController.ToggleAsync();
-        musicSession.Emit("Retained captions");
-        musicSession.EmitActivity(AudioActivity.Music);
-        clock.Advance(6);
-        Require(musicClears == 0 && musicController.Text.Length > 0, "Music cleared captions before seven seconds");
-        musicSession.EmitActivity(AudioActivity.Music);
-        clock.Advance(1);
-        Require(musicClears == 1 && musicController.Text == "", "Continuous music did not clear visible and queued captions once");
-        musicSession.Emit("Late translation"); clock.Advance(20);
-        Require(musicClears == 1 && musicController.Text == "", "Late translation refilled captions during music");
-        musicSession.EmitActivity(AudioActivity.Speech); musicSession.Emit("Speech resumed");
-        Require(musicController.Text == "Speech resumed", "Speech after music did not restore captions");
-        musicSession.EmitActivity(AudioActivity.Music); clock.Advance(5);
-        musicSession.EmitActivity(AudioActivity.Idle); clock.Advance(20);
-        Require(musicClears == 2 && musicController.Text == "", "Interrupted music did not expire after fifteen seconds without captions");
-        musicSession.Emit("Keep while paused");
-        musicSession.EmitActivity(AudioActivity.Music); clock.Advance(6);
-        await musicController.PauseAsync(); clock.Advance(20);
-        Require(musicClears == 2 && musicController.Text.Length > 0, "Timer cleared retained captions after pause");
-        await musicController.ShutdownAsync();
+        var activityClock = new ManualClock();
+        var activitySession = new FakeSession(); activitySession.Started.SetResult();
+        var activityController = new CaptionController(settings, _ => activitySession, a => a(), activityClock);
+        var activityFades = 0;
+        activityController.CaptionsFading += () => activityFades++;
+        await activityController.ToggleAsync();
+        activitySession.Emit("Initial caption");
+        activitySession.EmitActivity(AudioActivity.Speech);
+        activitySession.EmitActivity(AudioActivity.Idle);
+        activityClock.Advance(8);
+        Require(activityFades == 0 && activityController.Text.Length > 0,
+            "Audio activity faded captions before the caption inactivity timeout");
+        activitySession.Emit("Next caption");
+        Require(activityController.Text.Contains("Next caption"), "Audio activity suppressed incoming captions");
+        activityClock.Advance(8);
+        Require(activityFades == 0, "Fresh captions failed to extend visibility beyond fifteen seconds total");
+        await activityController.ShutdownAsync();
         var idleClock = new ManualClock();
         var idleSession = new FakeSession(); idleSession.Started.SetResult();
         var idle = new CaptionController(settings, _ => idleSession, a => a(), idleClock);
@@ -337,16 +338,10 @@ internal static class ControllerChecks
         raceClock.Advance(15); var staleInactivity = deferred.Dequeue();
         raceSession.Emit("New caption"); Drain(); staleInactivity();
         Require(raceClears == 0 && race.Text == "New caption", "Queued inactivity timeout erased newer captions");
-        raceSession.Emit("Keep on screen"); raceSession.EmitActivity(AudioActivity.Music); Drain();
-        raceClock.Advance(7); var oldTimeout = deferred.Dequeue();
-        raceSession.EmitActivity(AudioActivity.Idle); raceSession.EmitActivity(AudioActivity.Music); Drain();
-        oldTimeout();
-        Require(raceClears == 0 && race.Text.Length > 0, "Queued old music timeout cleared a newer music interval");
-        raceClock.Advance(7); var pausedTimeout = deferred.Dequeue();
-        await race.PauseAsync(); pausedTimeout();
+        await race.PauseAsync();
         raceSession.EmitDiagnostic("Stale recovery notice"); Drain();
         Require(race.Errors.Entries.Count == 1, "Stale recovery diagnostics survived pause");
-        Require(raceClears == 0 && race.Text.Length > 0, "Queued music timeout cleared captions after pause");
+        Require(raceClears == 0 && race.Text.Length > 0, "Pause cleared retained captions");
         await race.ShutdownAsync();
         var filteredSession = new FakeSession(); filteredSession.Started.SetResult();
         var filtered = new CaptionController(settings, _ => filteredSession, a => a());

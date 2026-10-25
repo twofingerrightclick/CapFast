@@ -1,5 +1,25 @@
 using CapFast.Core;
 
+if (args.Length >= 3 && args[0] == "--local-speech-report")
+{
+    var reports = args.Skip(2).Select(path => LocalSpeechChecks.MeasurePcm(path)).ToArray();
+    using var output = new FileStream(args[1], FileMode.CreateNew);
+    System.Text.Json.JsonSerializer.Serialize(output, reports, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+    Console.WriteLine($"Measured {reports.Length} PCM fixtures: {args[1]}");
+    return;
+}
+
+if (args.Length > 0 && args[0] == "--local-speech-checks")
+{
+    LocalSpeechChecks.Run();
+    foreach (var path in args.Skip(1)) LocalSpeechChecks.RunPcm(path);
+    return;
+}
+LocalSpeechChecks.Run();
+
+AudioMonitorChecks.Run();
+SlideshowChecks.Run();
+
 if (args.Length == 1 && args[0] == "--configuration-checks")
 {
     ConfigurationChecks.Run();

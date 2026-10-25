@@ -1,5 +1,7 @@
 # Speech activity gate — October 9, 2026
 
+> Historical note: music detection, rejection, and caption suppression have been removed. Only local speech detection remains; operators pause captions during music. Music-related findings below describe the earlier implementation.
+
 The previous working caption implementation is preserved in commit `b079627`. Google Mac capture now uses Apple SoundAnalysis on-device, with one-second classification windows overlapping by 50%. Classifier availability and the exact labels `speech`, `music`, `singing`, and `choir_singing` were verified with a compiled metadata probe. CoreML execution requires running outside the tool sandbox; the packaged app runs normally. No separate downloaded inference model or cloud classification service is used.
 
 Each 100 ms PCM frame is released only after its overlapping classification windows report. Speech confidence must reach 0.5. Music/singing confidence of 0.5 independently vetoes a frame, even when speech is also detected. A very-low-energy check only rejects silence; it never qualifies speech by itself. Unknown/noise is rejected. A classifier initialization/inference failure stops capture with a curated error, without reverting to an energy-only filter.

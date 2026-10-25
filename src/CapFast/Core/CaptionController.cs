@@ -18,14 +18,11 @@ public sealed class CaptionController
     private readonly TimeProvider _timeProvider;
     private ITimer? _inactivityTimer;
     private int _inactivityEpoch;
-    private ITimer? _musicTimer;
-    private int _musicEpoch;
     private ITimer? _recoveryTimer;
     private int _recoveryEpoch;
     private int _recoveryAttempts;
     private DateTimeOffset? _liveSince;
     private bool _acceptedCaptionSinceStart;
-    private bool _musicExpired;
     private bool _wantLive;
     private bool _shutdown;
     private int _generation;
@@ -39,8 +36,10 @@ public sealed class CaptionController
     public void ResetLanguageDetection() => (_session as ILanguageAssignmentSession)?.ResetLanguageDetection();
     public void HintInputLanguage(string code) => (_session as ILanguageAssignmentSession)?.HintInputLanguage(code);
     public CaptionSettings Settings { get; }
+    public Slideshow Slideshow { get; } = new();
     public CaptionState State { get; private set; } = CaptionState.Paused;
     public bool IsPaused => State == CaptionState.Paused;
+    public bool HasActiveAudioSession => State == CaptionState.Live && _session is not null && _demo is null;
     public AudioActivity AudioActivity { get; private set; } = AudioActivity.Idle;
     public bool HasAudioActivity { get; private set; }
     public string Text => _buffer.Text;
@@ -111,36 +110,8 @@ public sealed class CaptionController
         CaptionsFading?.Invoke(); Changed?.Invoke();
     }
 
-    private void CancelMusicCountdown()
-    {
-        ++_musicEpoch;
-        _musicTimer?.Dispose(); _musicTimer = null;
-        _musicExpired = false;
-    }
-
-    private void SetAudioActivity(AudioActivity activity, int generation)
-    {
-        CancelMusicCountdown();
-        AudioActivity = activity;
-        if (activity == AudioActivity.Music)
-        {
-            var epoch = _musicEpoch;
-            _musicTimer = _timeProvider.CreateTimer(_ => _dispatch(() =>
-            {
-                if (generation != _generation || epoch != _musicEpoch || !_wantLive || AudioActivity != AudioActivity.Music) return;
-                _musicExpired = true;
-                _musicTimer?.Dispose(); _musicTimer = null;
-                FadeCaptions("Music continued for 7 seconds. Existing text faded; capture is still live.");
-            }), null, TimeSpan.FromSeconds(7), Timeout.InfiniteTimeSpan);
-        }
-        Changed?.Invoke();
-    }
-
     private void ApplyCaption(CaptionUpdate update)
     {
-        // Late results from already accepted speech must not refill the screen
-        // after the music timeout. New non-music activity restores delivery.
-        if (_musicExpired && AudioActivity == AudioActivity.Music) return;
         if (CaptionContentSafety.IsTechnicalOutput(update.Text) || CaptionContentSafety.IsTechnicalOutput(update.FrenchText))
         {
             Errors.Add("A provider returned technical text instead of a caption. The text was withheld from the audience.");
@@ -167,12 +138,12 @@ public sealed class CaptionController
         if (_shutdown) return Task.CompletedTask;
         if (!_wantLive) _recoveryAttempts = 0;
         _wantLive = !_wantLive;
-        if (!_wantLive) { CancelRecovery(); CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel(); State = CaptionState.Pausing; Changed?.Invoke(); }
+        if (!_wantLive) { CancelRecovery(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel(); State = CaptionState.Pausing; Changed?.Invoke(); }
         return ReconcileAsync();
     }
     public Task PauseAsync()
     {
-        _wantLive = false; CancelRecovery(); _recoveryAttempts = 0; CancelMusicCountdown(); CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel();
+        _wantLive = false; CancelRecovery(); _recoveryAttempts = 0; CancelInactivityCountdown(); ++_generation; _starting?.Cancel(); _demo?.Cancel();
         if (!IsPaused) { State = CaptionState.Pausing; Changed?.Invoke(); }
         return ReconcileAsync();
     }
@@ -211,7 +182,8 @@ public sealed class CaptionController
                     audioActivity.AudioActivityChanged += activity => _dispatch(() =>
                     {
                         if (generation != _generation || !_wantLive || AudioActivity == activity) return;
-                        SetAudioActivity(activity, generation);
+                        AudioActivity = activity;
+                        Changed?.Invoke();
                     });
                 if (session is ICaptionDiagnosticsSession diagnostics)
                     diagnostics.Diagnostic += message => _dispatch(() =>
@@ -355,7 +327,7 @@ public sealed class CaptionController
     private async Task StopAsync()
     {
         ++_generation;
-        CancelMusicCountdown(); CancelInactivityCountdown();
+        CancelInactivityCountdown();
         AudioActivity = AudioActivity.Idle; HasAudioActivity = false;
         _demo?.Cancel(); _demo?.Dispose(); _demo = null;
         var session = _session; _session = null;

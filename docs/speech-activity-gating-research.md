@@ -1,5 +1,7 @@
 # Local speech gating research
 
+> Historical note: music detection, rejection, and caption suppression have been removed. Only local speech detection remains; operators pause captions during music. Music-related findings below describe the earlier implementation.
+
 Researched 2026-10-09 for CapFast’s Mac audio capture. The user’s selected policy is strict: suppress music and singing even when speech occurs over music. Findings below distinguish sourced capabilities, local observations, and proposed policy.
 
 ## Recommendation

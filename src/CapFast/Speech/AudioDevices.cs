@@ -5,11 +5,23 @@ using CapFast.Core;
 
 namespace CapFast.Speech;
 
-public static class MacAudioInputs
+public static class AudioDevices
 {
-    public static async Task<IReadOnlyList<AudioInput>> ListAsync(CancellationToken cancellationToken = default)
+    public static async Task<IReadOnlyList<AudioInput>> ListInputsAsync(CancellationToken cancellationToken = default)
+        => await ListDevicesAsync(false, cancellationToken);
+
+    public static Task<IReadOnlyList<AudioInput>> ListOutputsAsync(CancellationToken cancellationToken = default)
+        => ListDevicesAsync(true, cancellationToken);
+
+    private static async Task<IReadOnlyList<AudioInput>> ListDevicesAsync(bool outputs, CancellationToken cancellationToken)
     {
         var inputs = new List<AudioInput> { new("", "System default") };
+        if (OperatingSystem.IsWindows())
+            return await Task.Run<IReadOnlyList<AudioInput>>(() =>
+            {
+                if (!OperatingSystem.IsWindows()) return inputs;
+                return WindowsAudioCapture.ListDevices(outputs).Select(x => new AudioInput(x.Id, x.Name)).ToArray();
+            }, cancellationToken);
         if (!OperatingSystem.IsMacOS()) return inputs;
         var helper = Path.Combine(AppContext.BaseDirectory, "CapFast.AudioCapture");
         if (!File.Exists(helper)) throw new InvalidOperationException("Audio input discovery requires the packaged Mac app.");
@@ -20,7 +32,7 @@ public static class MacAudioInputs
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
             CreateNoWindow = true
         };
-        info.ArgumentList.Add("--list-inputs");
+        info.ArgumentList.Add(outputs ? "--list-outputs" : "--list-inputs");
         using var process = new Process { StartInfo = info };
         try
         {
@@ -44,7 +56,7 @@ public static class MacAudioInputs
             return inputs;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch { throw new InvalidOperationException("Could not list Mac audio inputs. Check connected devices and reopen Settings."); }
+        catch { throw new InvalidOperationException("Could not list Mac audio devices. Check connected devices and reopen Settings."); }
         finally
         {
             try { if (!process.HasExited) process.Kill(); } catch { }

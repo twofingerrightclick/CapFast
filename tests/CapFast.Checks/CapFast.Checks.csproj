@@ -6,6 +6,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/CapFast/Speech/MonitorPlaybackBuffer.cs" Link="MonitorPlaybackBuffer.cs" />
+    <Compile Include="../../src/CapFast/Speech/WindowsAudioMonitor.cs" Link="WindowsAudioMonitor.cs" />
+    <Compile Include="../../src/CapFast/Core/AudioMonitorHealth.cs" Link="AudioMonitorHealth.cs" />
+    <Compile Include="../../src/CapFast/Core/Slideshow.cs" Link="Slideshow.cs" />
     <Compile Include="../../src/CapFast/Core/AppearancePreferences.cs" Link="AppearancePreferences.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionPreferences.cs" Link="CaptionPreferences.cs" />
     <Compile Include="../../src/CapFast/Core/EnglishCaptionFilter.cs" Link="EnglishCaptionFilter.cs" />
@@ -43,4 +47,10 @@
     <Compile Include="../../src/CapFast/Core/LanguageSurfaceRouting.cs" Link="LanguageSurfaceRouting.cs" />
     <Compile Include="../../src/CapFast/Core/TranscriptLanguageResolver.cs" Link="TranscriptLanguageResolver.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../src/CapFast/Speech/SileroSpeechDetector.cs" Link="SileroSpeechDetector.cs" />
+    <Compile Include="../../src/CapFast/Speech/PcmSpeechFramer.cs" Link="PcmSpeechFramer.cs" />
+    <Compile Include="../../src/CapFast/Speech/WindowsAudioCapture.cs" Link="WindowsAudioCapture.cs" />
+  </ItemGroup>
+  <Import Project="../../AudioDependencies.props" />
 </Project>

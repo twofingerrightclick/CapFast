@@ -51,6 +51,8 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     private BlockTextTranslator? _blockTranslator;
     private readonly SourceTranslationPipeline? _pipeline;
     private Process? _microphone;
+    private SileroSpeechDetector? _speechDetector;
+    private bool _captureActive;
     private Task? _sendAudio;
     private Task? _readAudio;
     private Task? _monitorAudio;
@@ -58,7 +60,6 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     private int _disposed;
     private int _ended;
     private readonly string? _audioDeviceId;
-    private readonly bool _rejectMusic;
     private CaptionSessionException? _failure;
 
     public LanguageAssignment? LanguageAssignment => _pipeline?.Assignment;
@@ -74,11 +75,11 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     public event Action<string>? Ended;
     public event Action<CaptionFailure>? Failure;
 
-    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null, bool rejectMusic = false)
-        : this(apiKey, audioDeviceId, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock(), rejectMusic) { }
+    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null)
+        : this(apiKey, audioDeviceId, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock()) { }
 
     internal GeminiCaptionSession(string apiKey, string? audioDeviceId,
-        Func<ILiveTransport> transportFactory, ILiveClock clock, bool rejectMusic = false,
+        Func<ILiveTransport> transportFactory, ILiveClock clock,
         Func<string, CancellationToken, Task<string?>>? detectLanguage = null,
         Func<string, LanguageAssignment, CancellationToken, Task<(string Primary, string Secondary)>>? drainTranslate = null,
         Func<string, string, string?, CancellationToken, Task<MultilingualCaptionResult>>? combinedTranslate = null)
@@ -88,7 +89,6 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
         _transportFactory = transportFactory;
         _clock = clock; _detectionOverride = detectLanguage;
         _audioDeviceId = audioDeviceId;
-        _rejectMusic = rejectMusic;
         _useCombinedTranslation = combinedTranslate is not null || (detectLanguage is null && drainTranslate is null);
         if (_useCombinedTranslation)
         {
@@ -122,37 +122,49 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
         using var cancellation = cancellationToken.Register(() => _lifetime.Cancel());
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (Interlocked.Exchange(ref _started, 1) != 0) throw new InvalidOperationException("Session already started.");
-        if (!OperatingSystem.IsMacOS()) throw new CaptionSessionException("Gemini audio capture currently supports macOS only.");
+        if (!OperatingSystem.IsMacOS() && !OperatingSystem.IsWindows())
+            throw new CaptionSessionException("Audio capture supports macOS and Windows only.");
         var helper = Path.Combine(AppContext.BaseDirectory, "CapFast.AudioCapture");
-        if (!File.Exists(helper)) throw new CaptionSessionException("Mac audio helper is missing. Launch the packaged CapFast.app.");
-        Status?.Invoke("Checking Mac microphone permission…");
-        await RequestMicrophonePermissionAsync(_lifetime.Token);
+        if (OperatingSystem.IsMacOS())
+        {
+            if (!File.Exists(helper)) throw new CaptionSessionException("Mac audio helper is missing. Launch the packaged CapFast.app.");
+            Status?.Invoke("Checking Mac microphone permission…");
+            await RequestMicrophonePermissionAsync(_lifetime.Token);
+        }
+        Status?.Invoke("Loading local speech detection…");
+        try { _speechDetector = await Task.Run(() => new SileroSpeechDetector(), _lifetime.Token); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { throw; }
+        catch { throw new CaptionSessionException("Local speech classification is unavailable. Reinstall the packaged app with its model and runtime dependencies."); }
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
         var stage = "connection";
         try
         {
-            Status?.Invoke("Microphone permission granted. Connecting to Gemini…");
+            Status?.Invoke("Connecting to Gemini…");
             await EnsureConnectedAsync(token: timeout.Token);
             stage = "setup";
             timeout.Token.ThrowIfCancellationRequested();
-            // Capture begins only after the service accepts setup; permission was checked first.
+            // Capture begins only after the service accepts setup. macOS permission
+            // was checked first; WASAPI checks Windows access when capture starts.
             stage = "capture";
-            var captureInfo = new ProcessStartInfo(helper)
+            _captureActive = true;
+            if (OperatingSystem.IsMacOS())
             {
-                UseShellExecute = false, RedirectStandardOutput = true,
-                RedirectStandardError = true, CreateNoWindow = true
-            };
-            captureInfo.ArgumentList.Add("--activity");
-            if (!string.IsNullOrWhiteSpace(_audioDeviceId))
-            {
-                captureInfo.ArgumentList.Add("--device");
-                captureInfo.ArgumentList.Add(_audioDeviceId);
+                var captureInfo = new ProcessStartInfo(helper)
+                {
+                    UseShellExecute = false, RedirectStandardOutput = true,
+                    RedirectStandardError = true, CreateNoWindow = true
+                };
+                if (!string.IsNullOrWhiteSpace(_audioDeviceId))
+                {
+                    captureInfo.ArgumentList.Add("--device");
+                    captureInfo.ArgumentList.Add(_audioDeviceId);
+                }
+                _microphone = Process.Start(captureInfo) ?? throw new CaptionSessionException("Mac audio capture could not start. Relaunch the packaged app.");
+                _monitorAudio = MonitorAudioAsync(_microphone);
             }
-            _microphone = Process.Start(captureInfo) ?? throw new CaptionSessionException("Gemini connected, but the Mac audio helper could not start.");
-            Status?.Invoke("Gemini connected — starting the selected Mac audio input.");
-            _monitorAudio = MonitorAudioAsync(_microphone);
-            _sendAudio = SendAudioAsync(_microphone);
+            Status?.Invoke("Gemini connected — starting the selected audio input.");
+            _sendAudio = Task.Run(() => SendAudioAsync(_microphone));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -175,7 +187,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
             }
             throw new CaptionSessionException(stage == "setup"
                 ? "Gemini connected, but the startup deadline expired before audio capture began. Check the connection and service availability."
-                : "Gemini setup succeeded, but the Mac audio helper could not start. Check the selected input and relaunch the packaged app.");
+                : "Audio capture could not start. Check the selected input, microphone privacy settings, and packaged app dependencies.");
         }
     }
 
@@ -502,7 +514,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
         }
     }
 
-    private async Task SendAudioAsync(Process microphone)
+    private async Task SendAudioAsync(Process? microphone)
     {
         var frames = Channel.CreateBounded<ClassifiedAudioFrame>(new BoundedChannelOptions(200)
         { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
@@ -511,36 +523,55 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (CaptionSessionException safe) { Fail(safe.Message); }
         catch { Fail("Google audio streaming failed. Check the network and restart the session."); }
+        finally
+        {
+            // Include capture teardown in this task even if DisposeAsync observed
+            // it before the worker assigned _readAudio. The model stays alive
+            // until the final inference and WASAPI callback have completed.
+            if (_readAudio is { } reader) await reader;
+        }
     }
 
-    private async Task ReadAudioAsync(Process microphone, ChannelWriter<ClassifiedAudioFrame> writer)
+    private async Task ReadAudioAsync(Process? microphone, ChannelWriter<ClassifiedAudioFrame> writer)
     {
         try
         {
-            var packet = new byte[3201];
+            var framer = new PcmSpeechFramer(samples =>
+            {
+                try { return _speechDetector!.Predict(samples); }
+                catch { throw new CaptionSessionException("Local speech classification is unavailable. Reinstall the packaged app with its model and runtime dependencies."); }
+            }, frame =>
+            {
+                if (!writer.TryWrite(frame))
+                    throw new CaptionSessionException("Google connection recovery could not keep up with the audio. Capture paused before the bounded local queue overflowed.");
+            });
+            if (OperatingSystem.IsWindows())
+            {
+                await WindowsAudioCapture.RunAsync(_audioDeviceId, pcm => framer.Append(pcm), _lifetime.Token);
+                return;
+            }
+            if (microphone is null) throw new CaptionSessionException("Mac audio helper is missing.");
+            var packet = new byte[3200];
             var first = true;
             while (!_lifetime.IsCancellationRequested)
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
                 timeout.CancelAfter(TimeSpan.FromSeconds(first ? 10 : 5));
-                var length = await microphone.StandardOutput.BaseStream.ReadAtLeastAsync(packet, packet.Length, false, timeout.Token);
+                var length = await microphone.StandardOutput.BaseStream.ReadAsync(packet, timeout.Token);
                 if (length == 0) break;
-                if (length != packet.Length || packet[0] > (byte)AudioFrameKind.Music)
-                    throw new CaptionSessionException("Mac speech classification returned an invalid frame. Capture stopped; restart the packaged app.");
                 first = false;
-                if (!writer.TryWrite(new(packet.AsSpan(1).ToArray(), (AudioFrameKind)packet[0])))
-                    throw new CaptionSessionException("Google connection recovery could not keep up with the audio. Capture paused before the bounded local queue overflowed.");
+                framer.Append(packet.AsSpan(0, length));
             }
             if (!_lifetime.IsCancellationRequested)
             {
                 if (_monitorAudio is { } monitor) try { await monitor.WaitAsync(TimeSpan.FromSeconds(1)); } catch { }
                 if (!_lifetime.IsCancellationRequested)
-                    throw new CaptionSessionException("The selected Mac audio input stopped producing audio. Check the input device and restart the session.");
+                    throw new CaptionSessionException("The selected audio input stopped producing audio. Check the device and microphone privacy settings, then restart.");
             }
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
         catch (CaptionSessionException safe) { Fail(safe.Message); }
-        catch { Fail("The selected Mac audio input stopped producing audio. Check the input device and restart the session."); }
+        catch { Fail("The selected audio input stopped producing audio. Check the device and microphone privacy settings, then restart."); }
         finally { writer.TryComplete(); }
     }
 
@@ -557,25 +588,25 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
 
     private async Task PumpAudioAsync(ChannelReader<ClassifiedAudioFrame> frames)
     {
-        var gate = new SpeechAudioGate(_rejectMusic);
+        var gate = new SpeechAudioGate();
         var activity = AudioActivity.Idle;
         var recovering = false;
         var awaitingSpeechBlock = false;
         AudioActivityChanged?.Invoke(activity);
         await foreach (var frame in frames.ReadAllAsync(_lifetime.Token))
         {
-            var blockExpired = _pipeline?.ObserveAudio(frame.Kind switch { AudioFrameKind.Speech => AudioActivity.Speech, AudioFrameKind.Music => AudioActivity.Music, _ => AudioActivity.Idle }, Now) == true;
+            var blockExpired = _pipeline?.ObserveAudio(frame.Kind switch { AudioFrameKind.Speech => AudioActivity.Speech, _ => AudioActivity.Idle }, Now) == true;
             if (blockExpired || (_pipeline is not null && _connection is { } currentStream && currentStream.AudioGeneration != _pipeline.AudioGeneration))
             {
                 // A fresh recognition stream makes even a previously unseen late
                 // final belong to the retired audio generation, never the next block.
                 if (_connection is { } expired) await CloseConnectionAsync(expired);
-                gate = new SpeechAudioGate(_rejectMusic);
+                gate = new SpeechAudioGate();
                 awaitingSpeechBlock = true;
                 Status?.Invoke("Listening locally — Google reconnects when speech resumes.");
             }
             var observedActivity = frame.Kind switch { AudioFrameKind.Speech => AudioActivity.Speech,
-                AudioFrameKind.Music => AudioActivity.Music, _ => AudioActivity.Idle };
+                _ => AudioActivity.Idle };
             if (observedActivity != activity) { activity = observedActivity; AudioActivityChanged?.Invoke(activity); }
             if (awaitingSpeechBlock)
             {
@@ -663,7 +694,6 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
             var formatError = false;
             var startError = false;
             var backpressure = false;
-            var classifierError = false;
             while (await microphone.StandardError.ReadLineAsync(_lifetime.Token) is { } line)
             {
                 permissionDenied |= line == "MIC_PERMISSION_DENIED";
@@ -671,7 +701,6 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
                 formatError |= line is "MIC_FORMAT_ERROR" or "MIC_CONVERSION_ERROR";
                 startError |= line == "MIC_START_ERROR";
                 backpressure |= line == "MIC_BACKPRESSURE";
-                classifierError |= line == "MIC_CLASSIFIER_ERROR";
             }
             await microphone.WaitForExitAsync(_lifetime.Token);
             if (!_lifetime.IsCancellationRequested) Fail(permissionDenied
@@ -679,7 +708,6 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
                 : deviceUnavailable ? "The selected audio input is unavailable. Choose another input in Settings and start again."
                 : formatError ? "The selected audio input has an unsupported audio format. Choose another input in Settings and start again."
                 : startError ? "Mac audio capture could not start. Check the selected input and close other apps holding the device."
-                : classifierError ? "Mac speech and music classification is unavailable. Capture stopped without uploading unclassified audio. Relaunch the packaged app."
                 : backpressure ? "Mac audio capture stopped because the upload could not keep up. Check the network and restart."
                 : "Mac audio capture stopped. Check the selected audio input and start again.");
         }
@@ -695,7 +723,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
         _lifetime.Cancel();
         _connection?.Transport.Abort();
         try { if (_microphone is { HasExited: false }) _microphone.Kill(); } catch { }
-        if (_microphone is not null)
+        if (_captureActive)
         {
             Failure?.Invoke(new(message, CaptionFailurePolicy.RequiresOperatorAction(message)));
             Ended?.Invoke(message);
@@ -719,7 +747,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
         _languageDetector?.Dispose();
         _multilingualTranslator?.Dispose();
         // Canceled workers can still finish after the timeout; dispose CTS when all finish.
-        _ = completion.ContinueWith(_ => _lifetime.Dispose(), CancellationToken.None,
+        _ = completion.ContinueWith(_ => { _speechDetector?.Dispose(); _lifetime.Dispose(); }, CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 }

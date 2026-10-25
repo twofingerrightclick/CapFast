@@ -10,7 +10,7 @@ public static class LanguageAssignmentChecks
         var switched = state.Accept("sw-KE", 2)!;
         Check(switched.Input == "sw" && switched.Primary == "en" && switched.Secondary == "fr" && switched.Epoch == first.Epoch && state.Current == first);
         state.ObserveAudio(AudioActivity.Idle, 6); Check(state.Current == first);
-        state.ObserveAudio(AudioActivity.Music, 7); Check(state.Current is null);
+        state.ObserveAudio(AudioActivity.Idle, 7); Check(state.Current is null);
         state.ObserveAudio(AudioActivity.Speech, 8);
         var second = state.Accept("sw", 8)!;
         Check(second.Primary == "en" && second.Secondary == "fr" && second.Epoch > first.Epoch);
