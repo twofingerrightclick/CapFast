@@ -28,7 +28,10 @@ session; pause and restart after changing the system default device.
 ## Packaging
 
 - `bash scripts/publish-macos.sh [osx-arm64|osx-x64]` builds and signs the native helper.
-- `pwsh scripts/publish-windows.ps1 [-Runtime win-x64|win-arm64]` publishes a self-contained folder.
+- `pwsh scripts/publish-windows.ps1 [-Runtime win-x64|win-arm64]` publishes a self-contained folder
+  at `artifacts/windows/<runtime>/YYYY-MM-DD-HHmmss/`. Its executable is named
+  `CapFast-YYYY-MM-DD-HHmmss.exe` using local build time, which also identifies
+  the product version. Keep each build's files together when distributing updates.
 - Distribute the entire output including `Models/silero_vad.onnx`, ONNX Runtime
   native libraries, and licenses. Windows may require the Microsoft Visual C++
   2015–2022 Redistributable for its architecture.

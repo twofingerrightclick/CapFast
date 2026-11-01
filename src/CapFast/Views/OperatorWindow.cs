@@ -17,6 +17,11 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _lightMode = new() { Content = "Light mode" };
     private readonly StackPanel _configuration;
     private readonly TextBox _gemini = new() { IsVisible = false, PasswordChar = '●' };
+    private readonly SavedGoogleKeyStore _savedGoogleKey = new();
+    private readonly Button _saveKey = new() { Content = "Save API key" };
+    private readonly Button _removeKey = new() { Content = "Remove saved key" };
+    private readonly TextBlock _keyStatus = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+    private bool _persistingKey;
     private readonly TextBlock _googleDescription = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 };
     private readonly Slider _size = new() { Minimum = 28, Maximum = 72 };
     private readonly Slider _readingSpeed = new() { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true };
@@ -64,6 +69,7 @@ public sealed class SettingsWindow : Window
     private bool _closed;
     private bool _reloadingFile;
     private Task<LocalConfiguration>? _reloadRead;
+    private long _reloadRevision;
     private string? _reloadPath;
     private bool _openingFile;
     private Task? _prepareFile;
@@ -97,6 +103,17 @@ public sealed class SettingsWindow : Window
             new TextBlock { Text = "Pause captions when music plays. Resume when speech begins.",
                 TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
             Label("Gemini API key"), editGoogleKey, _gemini } };
+        if (OperatingSystem.IsWindows())
+        {
+            _googlePanel.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10,
+                Children = { _saveKey, _removeKey } });
+            _keyStatus.Text = "Save API key keeps this key encrypted for your Windows account. Unsaved edits last until the app closes." + EnvironmentKeyNotice;
+            Avalonia.Automation.AutomationProperties.SetName(_gemini, "Gemini API key");
+            Avalonia.Automation.AutomationProperties.SetLiveSetting(_keyStatus, Avalonia.Automation.AutomationLiveSetting.Polite);
+            _googlePanel.Children.Add(_keyStatus);
+        }
+        _saveKey.Click += async (_, _) => await PersistGoogleKeyAsync(remove: false);
+        _removeKey.Click += async (_, _) => await PersistGoogleKeyAsync(remove: true);
         _configuration = new StackPanel { Spacing = 14, Children = { _googlePanel } };
         foreach (var code in new[] { "en", "sw", "fr" })
         {
@@ -217,7 +234,9 @@ public sealed class SettingsWindow : Window
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _audio, _refreshAudio } },
                 _audioAvailability, _microphone, Label("Appearance"), _lightMode,
                 _notice, _configuration,
-                new TextBlock { Text = "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
+                new TextBlock { Text = OperatingSystem.IsWindows()
+                    ? "This local file is a plaintext fallback, used when no environment variable or saved key is available. Save API key above stores an encrypted key instead."
+                    : "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 _configurationPath,
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } }
@@ -329,6 +348,10 @@ public sealed class SettingsWindow : Window
         _gemini.Text = _controller.Settings.GeminiKey;
         _configurationPath.Text = _controller.Settings.ConfigurationPath;
         _diagnostic.Text = _controller.Settings.ConfigurationError ?? "";
+        if (OperatingSystem.IsWindows() && !_persistingKey && _controller.Settings.IsGoogleKeyFromConfiguration)
+            _keyStatus.Text = (_controller.Settings.GeminiKey.Length > 0
+                ? "API key loaded from configuration. Save API key stores an encrypted copy for your Windows account."
+                : "No API key is configured. Enter your key, then click Save API key to keep it for future launches.") + EnvironmentKeyNotice;
         _loading = false;
     }
 
@@ -384,6 +407,7 @@ public sealed class SettingsWindow : Window
         _reloadingFile = true;
         var settings = _controller.Settings;
         var originalGoogle = settings.GeminiKey;
+        var originalRevision = settings.GoogleKeyRevision;
         var path = settings.ConfigurationPath;
         Refresh();
         _diagnostic.Text = "Reading local API configuration…";
@@ -391,12 +415,21 @@ public sealed class SettingsWindow : Window
         {
             // Reuse a blocked read rather than starting another on each click.
             if (_reloadRead is null || _reloadRead.IsCompleted || _reloadPath != path)
-            { _reloadPath = path; _reloadRead = Task.Run(() => new LocalConfiguration(path)); }
+            { _reloadPath = path; _reloadRevision = originalRevision; _reloadRead = Task.Run(() => new LocalConfiguration(path)); }
             var local = await _reloadRead.WaitAsync(TimeSpan.FromSeconds(5));
             if (_closed) return;
             if (local.Error is { } error)
-            { _diagnostic.Text = error; _controller.Errors.Add(error); return; }
-            settings.ApplyLocalConfiguration(local, originalGoogle);
+            {
+                // A broken encrypted key can still leave a usable environment/.env
+                // fallback. Keep the current key if no usable fallback was found.
+                if (local.GoogleKey.Length > 0)
+                {
+                    settings.ApplyLocalConfiguration(local, originalGoogle, _reloadRevision);
+                    _controller.NotifyLocalConfigurationLoaded();
+                }
+                _diagnostic.Text = error; _controller.Errors.Add(error); return;
+            }
+            settings.ApplyLocalConfiguration(local, originalGoogle, _reloadRevision);
             _controller.NotifyLocalConfigurationLoaded();
             _diagnostic.Text = "Local API configuration reloaded.";
         }
@@ -414,6 +447,43 @@ public sealed class SettingsWindow : Window
             { const string message = "Could not reload the local API configuration."; _diagnostic.Text = message; _controller.Errors.Add(message); }
         }
         finally { _reloadingFile = false; if (!_closed) Refresh(); }
+    }
+
+    private static string EnvironmentKeyNotice => LocalConfiguration.HasEnvironmentGoogleKey
+        ? " An environment API key is set; it takes priority over saved keys on startup and Reload file." : "";
+
+    private async Task PersistGoogleKeyAsync(bool remove)
+    {
+        if (!OperatingSystem.IsWindows() || !_controller.IsPaused || _persistingKey || _reloadingFile) return;
+        _persistingKey = true;
+        var settings = _controller.Settings;
+        settings.PreserveCurrentGoogleKey();
+        var key = settings.GeminiKey;
+        _keyStatus.Text = remove ? "Removing saved API key…" : "Saving encrypted API key…";
+        Refresh();
+        try
+        {
+            var error = await Task.Run(() => remove ? _savedGoogleKey.Remove() : _savedGoogleKey.Save(key));
+            if (_closed) return;
+            if (error is not null)
+            {
+                _keyStatus.Text = error;
+                _controller.Errors.Add(error);
+            }
+            else _keyStatus.Text = (remove
+                ? "Saved API key removed. The current key stays in memory until you close CapFast. Environment variables and the local file are still available on restart."
+                : "API key saved, encrypted for your Windows account. It will load on your next launch.") + EnvironmentKeyNotice;
+        }
+        catch
+        {
+            if (!_closed)
+            {
+                const string error = "Could not update the saved API key. Check access to your CapFast application data folder and try again. Your current key remains in memory.";
+                _keyStatus.Text = error;
+                _controller.Errors.Add(error);
+            }
+        }
+        finally { _persistingKey = false; if (!_closed) Refresh(); }
     }
 
     private async Task CheckMicrophoneAsync()
@@ -559,6 +629,8 @@ public sealed class SettingsWindow : Window
         if (_loading || !_controller.IsPaused) return;
         var settings = _controller.Settings;
         settings.GeminiKey = _gemini.Text ?? "";
+        if (OperatingSystem.IsWindows())
+            _keyStatus.Text = "Changes are in memory. Click Save API key to keep them for your next launch." + EnvironmentKeyNotice;
         _controller.SettingsChanged();
     }
     private void Refresh()
@@ -599,7 +671,9 @@ public sealed class SettingsWindow : Window
             pair.Value.IsEnabled = _controller.CanSetLanguageAssignment;
             Avalonia.Automation.AutomationProperties.SetName(pair.Value, $"{LanguageSurfaceRouting.Label(code)} {role.ToLowerInvariant()} — hint input language");
         }
-        _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile;
+        _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile && !_persistingKey;
+        _saveKey.IsEnabled = _removeKey.IsEnabled = !_persistingKey && !_reloadingFile;
+        _gemini.IsEnabled = !_persistingKey;
         _microphone.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _microphone.IsVisible = OperatingSystem.IsMacOS();
         _googleDescription.Text = "Every run starts in Auto. Each speech fragment is translated in its own language; the input indicator follows sustained language changes. English and Swahili captions share the left column; French stays on the right. Pending captions stay queued during slow requests. If translation cannot recover, capture pauses with an issue. Five seconds without speech returns to Detecting. A language click hints the next utterance.";

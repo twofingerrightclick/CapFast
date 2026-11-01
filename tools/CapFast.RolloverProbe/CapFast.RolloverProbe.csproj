@@ -4,6 +4,8 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.14" />
+    <Compile Include="../../src/CapFast/Core/SavedGoogleKeyStore.cs" Link="SavedGoogleKeyStore.cs" />
     <Compile Include="../../src/CapFast/Core/LocalConfiguration.cs" Link="LocalConfiguration.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionContentSafety.cs" Link="CaptionContentSafety.cs" />
     <Compile Include="../../src/CapFast/Core/LanguageSurfaceRouting.cs" Link="LanguageSurfaceRouting.cs" />

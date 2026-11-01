@@ -3,15 +3,22 @@ namespace CapFast.Core;
 public sealed class LocalConfiguration
 {
     private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
+    private readonly string _savedGoogleKey = "";
     public string Path { get; }
     public string? Error { get; private set; }
-    public LocalConfiguration(string? path = null, bool readValues = true)
+    public LocalConfiguration(string? path = null, bool readValues = true, IGoogleKeyStore? savedKeyStore = null)
     {
         Path = path ?? FallbackPath;
+        if (!readValues) return;
+        try
+        {
+            _savedGoogleKey = (savedKeyStore ?? new SavedGoogleKeyStore()).Load(out var savedError);
+            Error = savedError;
+        }
+        catch { Error = "Could not read the saved API key. Enter a key in Settings or use the local API key file."; }
         try
         {
             if (path is null) Path = FindPath();
-            if (!readValues) return;
             if (!File.Exists(Path)) return;
             if (new FileInfo(Path).Length > 65536) throw new IOException();
             foreach (var line in File.ReadLines(Path))
@@ -28,13 +35,16 @@ public sealed class LocalConfiguration
                 _values[name] = value;
             }
         }
-        catch { Error = "Could not read the local API configuration file. Check its permissions and size."; }
+        catch { Error = (Error is null ? "" : Error + " ") + "Could not read the local API configuration file. Check its permissions and size."; }
     }
     public string Get(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } environment
         ? environment : _values.GetValueOrDefault(name, "");
     public string GoogleKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") is { Length: > 0 } gemini ? gemini
         : Environment.GetEnvironmentVariable("GOOGLE_API_KEY") is { Length: > 0 } google ? google
+        : _savedGoogleKey is { Length: > 0 } saved ? saved
         : _values.GetValueOrDefault("GEMINI_API_KEY") is { Length: > 0 } local ? local : _values.GetValueOrDefault("GOOGLE_API_KEY", "");
+    public static bool HasEnvironmentGoogleKey => Environment.GetEnvironmentVariable("GEMINI_API_KEY") is { Length: > 0 }
+        || Environment.GetEnvironmentVariable("GOOGLE_API_KEY") is { Length: > 0 };
     private static string FindPath()
     {
         // A user-owned application file takes precedence. macOS can defer

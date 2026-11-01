@@ -18,7 +18,11 @@ The script defaults to Apple Silicon. Pass `osx-x64` for an Intel Mac. It requir
 ## Run on Windows
 
 Install the .NET 10 SDK, then run `pwsh scripts/publish-windows.ps1` and launch
-`artifacts/windows/win-x64/CapFast.exe`. Pass `-Runtime win-arm64` for ARM64.
+the dated executable, such as `CapFast-2026-10-31-183000.exe`, from the output
+folder printed by the script. Builds are kept separately under
+`artifacts/windows/win-x64/YYYY-MM-DD-HHmmss/`, using the build computer's local
+date and time so newer builds sort after older ones. The same stamp is included
+in the executable's product version. Pass `-Runtime win-arm64` for ARM64.
 Distribute the whole published folder. ONNX Runtime may require the Microsoft
 Visual C++ 2015–2022 Redistributable matching the architecture. Enable
 microphone access for desktop apps in Windows Settings. Windows capture is
@@ -27,7 +31,7 @@ implemented but still needs hardware validation; see [audio setup and validation
 ## Use it
 
 1. Open CapFast. The audience caption window opens **paused** with Settings alongside it; no audio is captured until you start.
-2. In Settings, enter your Google key. **Auto transcription → two output languages** is the caption workflow. Keys entered in Settings stay in memory; you can load a key from a local `.env` file. Reopen Settings with **CapFast → Settings…** or **⌘,**.
+2. In Settings, enter your Google key. **Auto transcription → two output languages** is the caption workflow. On Windows, click **Save API key** to keep it securely for future launches. Otherwise keys entered in Settings stay in memory; you can also load a key from a local `.env` file. Reopen Settings with **CapFast → Settings…** or **⌘,**.
 
    Turn on **Appearance → Light mode** for dark captions on a white background and light settings and error windows. Turn it off to return to dark mode. Appearance changes immediately, including during transcription, and is saved for the next launch.
 
@@ -54,19 +58,23 @@ The local Silero speech detector can miss speech, particularly very quiet source
 
 Google uses `gemini-3.5-transcribe-live` with English/Swahili/French recognition hints and verbatim transcription, then `gemini-3.8-flash` with low thinking to identify each fragment and return structured English, Swahili, and French renderings in one request. The app selects the two output languages from that result. Your key/project needs access and sufficient quota for both models.
 
-Store your key in `~/Library/Application Support/CapFast/.env` on macOS. If that file is absent, this development build falls back to `/Users/austen/Documents/Repo/CapFast/.env`. The project file is ignored by Git; configuration is never copied into the app bundle. Add:
+On Windows, expand **Audio, appearance & configuration**, click **Edit Google API key**, enter your key, and click **Save API key**. The masked field remains usable without saving. A message beside the controls confirms success or explains how to retry after a failure; editing the key afterward marks the changes as unsaved. Saving does not validate Google access or quota. **Remove saved key** deletes the encrypted copy; the current key remains in memory until you close CapFast. Removal leaves environment variables and `.env` files intact, so those can still supply a key on the next launch or **Reload file**.
+
+Windows saves only encrypted bytes in `%LOCALAPPDATA%\CapFast\google-api-key.dpapi` using [Windows DPAPI](https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.protecteddata) with `CurrentUser` scope. It loads automatically on the next launch under the same Windows account. No extra password or setup is required. Keep the original key elsewhere: the encrypted file is tied to your Windows profile and is not a portable backup. A failed save preserves the previous encrypted file. If it cannot be decrypted, Settings reports a safe error and you can enter and save a replacement or remove it. This protects the key at rest; programs running as your Windows user can also use that user's DPAPI access.
+
+The plaintext fallback is `~/Library/Application Support/CapFast/.env` on macOS and `%APPDATA%\CapFast\.env` on Windows. If absent, development builds can use the project's root `.env` (discovered from the project file, not arbitrary parent folders). The project file is ignored by Git; configuration is never copied into the app bundle. Add:
 
 ```dotenv
 GEMINI_API_KEY=your_google_api_key
 ```
 
-In Settings, **Open API key file** opens the displayed file in your text editor; **Reload file** loads it while paused. The caption window opens before background configuration loading, including Finder launches. If file access stalls, the window stays usable and reports the delay. The Open button creates an empty file if needed. Rebuilding leaves configuration intact. Keys typed only in Settings remain in memory; saving requires editing the file. Late file loading preserves keys you entered while waiting.
+In Settings, **Open API key file** opens the displayed file in your text editor; **Reload file** reloads configuration while paused. The caption window opens before background configuration loading, including Finder launches. If file access stalls, the window stays usable and reports the delay. The Open button creates an empty file if needed. Rebuilding leaves configuration intact. On macOS, keys typed only in Settings remain in memory; saving requires editing the file. Late loading preserves keys you entered, saved, or removed while waiting. Windows **Save API key** never changes a `.env` file or writes the key into general preferences, logs, or the distribution.
 
-Process environment variables override file values. Supported names are `GEMINI_API_KEY` (or `GOOGLE_API_KEY` fallback). File values are plain text; do not commit or share this file.
+On startup and **Reload file**, key precedence is: process `GEMINI_API_KEY`, process `GOOGLE_API_KEY`, saved encrypted Windows key, then `.env` `GEMINI_API_KEY` or `.env` `GOOGLE_API_KEY`. Empty values fall through. An environment-key notice appears beside the Windows save controls when an environment variable takes priority; you can still edit the current session's key. If reading the saved key fails, the plaintext fallback remains available. File values are plain text; do not commit or share this file.
 
 Use **Check microphone permission** in Settings to request/check Mac permission without starting capture or connecting to a cloud service. Starting Google translation also checks permission before connecting. If permission was already denied, macOS will not show a fresh prompt: enable CapFast under **System Settings → Privacy & Security → Microphone** and relaunch. Startup errors distinguish permission denial, network/HTTP connection failure, service access/quota/configuration rejection, and audio-helper failure. The Settings diagnostic area shows the latest issue and recent history without raw response bodies or credentials.
 
-Captions send audio to Google Transcribe Live and stable source text fragments with recent context to Flash for translation. Both stages incur their model charges. The app does not save audio or transcripts. Evaluation tools explicitly save test transcripts/results locally. Credentials are saved only when you put them in your local configuration file.
+Captions send audio to Google Transcribe Live and stable source text fragments with recent context to Flash for translation. Both stages incur their model charges. The app does not save audio or transcripts. Evaluation tools explicitly save test transcripts/results locally. Credentials persist only when you explicitly save an encrypted key on Windows or put them in your local configuration file.
 
 ## Caption behavior and limits
 

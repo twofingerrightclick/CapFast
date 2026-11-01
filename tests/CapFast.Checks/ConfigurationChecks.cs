@@ -5,11 +5,13 @@ internal static class ConfigurationChecks
 {
     public static void Run()
     {
+        SecureKeyChecks.Run();
         var rejected = GeminiCaptionSession.DescribeCloseFailure(1011, "Model not found secret-value", false);
         if (!rejected.Contains("model is unavailable") || rejected.Contains("secret-value")) throw new Exception("Close reason classification leaked or lost model error");
         var unknown = GeminiCaptionSession.DescribeCloseFailure(1011, "secret-value", true);
         if (!unknown.Contains("after setup") || unknown.Contains("secret-value")) throw new Exception("Unknown close reason leaked or lost setup stage");
         var file = Path.Combine(Path.GetTempPath(), "capfast-env-" + Guid.NewGuid() + ".env");
+        var savedKeys = new SavedGoogleKeyStore(file + ".dpapi");
         var previousGemini = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
         var previousGoogle = Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
         try
@@ -102,7 +104,7 @@ internal static class ConfigurationChecks
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", null);
             Environment.SetEnvironmentVariable("GOOGLE_API_KEY", null);
             File.WriteAllText(file, "# comment\nexport GEMINI_API_KEY = 'local-value'\nUNKNOWN=value\n");
-            var config = new LocalConfiguration(file);
+            var config = new LocalConfiguration(file, savedKeyStore: savedKeys);
             if (config.GoogleKey != "local-value" || config.Get("UNKNOWN") != "")
                 throw new Exception("Local config parse failed");
             if (new LocalConfiguration(file, readValues: false).GoogleKey != "") throw new Exception("Deferred configuration read local contents");
@@ -120,7 +122,7 @@ internal static class ConfigurationChecks
             Environment.SetEnvironmentVariable("GOOGLE_API_KEY", "environment-value");
             if (config.GoogleKey != "environment-value") throw new Exception("Process environment did not override file");
             File.WriteAllText(file, new string('x', 65537));
-            if (new LocalConfiguration(file).Error == null) throw new Exception("Oversized config accepted");
+            if (new LocalConfiguration(file, savedKeyStore: savedKeys).Error == null) throw new Exception("Oversized config accepted");
             Console.WriteLine("Configuration checks passed: API key loading and caption preference round trip, validation, and key exclusion.");
         }
         finally
