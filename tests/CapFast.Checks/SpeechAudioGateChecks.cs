@@ -43,17 +43,42 @@ public static class SpeechAudioGateChecks
             "Qualification discarded or reordered the opening speech.");
         gate.Reset();
         for (var i = 0; i < 10; i++) gate.Process(Frame(i), AudioFrameKind.Speech);
+        for (var i = 0; i < 5; i++)
+            Check(gate.Process(Frame(100), AudioFrameKind.Quiet).Audio.Count == 0,
+                "A half-second pause counted toward speech qualification.");
+        for (var i = 10; i < 19; i++)
+            Check(gate.Process(Frame(i), AudioFrameKind.Speech).Audio.Count == 0,
+                "Speech uploaded before two accumulated speech seconds.");
+        accepted = gate.Process(Frame(19), AudioFrameKind.Speech);
+        var pausedOpening = Enumerable.Range(0, 10).Select(i => (byte)i)
+            .Concat(Enumerable.Repeat((byte)100, 5)).Concat(Enumerable.Range(10, 10).Select(i => (byte)i));
+        Check(accepted.Audio.Count == 25 && accepted.Audio.Select(frame => frame[0]).SequenceEqual(pausedOpening),
+            "A half-second pause discarded speech before two seconds could qualify.");
+        gate.Reset();
+        for (var i = 0; i < 10; i++) gate.Process(Frame(i), AudioFrameKind.Speech);
         for (var i = 0; i < 3; i++) gate.Process(Frame(100), AudioFrameKind.Quiet);
         for (var i = 10; i < 19; i++) Check(gate.Process(Frame(i), AudioFrameKind.Speech).Audio.Count == 0, "Quiet time counted as qualifying speech.");
         accepted = gate.Process(Frame(19), AudioFrameKind.Speech);
         Check(accepted.Audio.Count == 23, "A short natural pause lost the beginning of qualified speech.");
-        for (var i = 0; i < 3; i++) Check(!gate.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "A short pause prematurely ended speech.");
+        for (var i = 0; i < 9; i++) Check(!gate.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "A short pause prematurely ended speech.");
+        accepted = gate.Process(Frame(20), AudioFrameKind.Speech);
+        Check(accepted.Audio.Count == 10 && accepted.Audio.Take(9).All(frame => frame[0] == 0)
+            && accepted.Audio[^1][0] == 20,
+            "Qualified speech requalified or lost its buffered pause on resumption.");
+        for (var i = 0; i < 9; i++) Check(!gate.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "A short pause prematurely ended speech.");
         Check(gate.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "Quiet did not finalize the accepted speech stream.");
         Check(!gate.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "Quiet finalized more than once.");
         gate.Reset();
         for (var i = 0; i < 19; i++) gate.Process(Frame(i), AudioFrameKind.Speech);
-        for (var i = 0; i < 4; i++) gate.Process(Frame(0), AudioFrameKind.Quiet);
+        for (var i = 0; i < 10; i++) gate.Process(Frame(0), AudioFrameKind.Quiet);
         Check(gate.Process(Frame(0), AudioFrameKind.Speech).Audio.Count == 0, "Separate short utterances combined across a long pause.");
+        gate.Reset();
+        for (var i = 0; i < 100; i++)
+        {
+            Check(gate.Process(Frame(i), AudioFrameKind.Speech).Audio.Count == 0,
+                "Sparse speech bypassed the bounded candidate buffer.");
+            for (var j = 0; j < 9; j++) gate.Process(Frame(0), AudioFrameKind.Quiet);
+        }
         try { gate.Process(new byte[1], AudioFrameKind.Speech); throw new Exception("Malformed frame accepted."); }
         catch (InvalidDataException) { }
         Console.WriteLine("Speech gate checks passed: silence, two-second qualification, opening audio, short pauses, stream end, and bounds.");

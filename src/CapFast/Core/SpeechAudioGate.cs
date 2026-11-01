@@ -5,10 +5,13 @@ public enum AudioActivity { Idle, Speech }
 public sealed record SpeechGateResult(AudioActivity Activity, IReadOnlyList<byte[]> Audio, bool EndStream);
 
 // Operates on locally classified 100 ms PCM frames. Qualification counts speech,
-// not elapsed time; short natural gaps do not discard the start of an utterance.
+// not elapsed time. Retain gaps shorter than one second so natural pauses do
+// not discard the start of an utterance or force already qualified speech to requalify.
 public sealed class SpeechAudioGate
 {
     public const int FrameBytes = 3200;
+    private const int QualificationSpeechFrames = 20;
+    private const int QuietResetFrames = 10;
     private readonly List<byte[]> _candidate = new();
     private readonly List<byte[]> _gap = new();
     private int _speechFrames;
@@ -25,7 +28,7 @@ public sealed class SpeechAudioGate
         {
             _quietFrames++;
             if (_speechFrames > 0 || _open) _gap.Add(pcm.ToArray());
-            if (_quietFrames >= 4)
+            if (_quietFrames >= QuietResetFrames)
             {
                 var end = _open;
                 Reset();
@@ -50,7 +53,7 @@ public sealed class SpeechAudioGate
             Reset();
             return new(AudioActivity.Idle, Array.Empty<byte[]>(), false);
         }
-        if (_speechFrames < 20) return new(AudioActivity.Speech, Array.Empty<byte[]>(), false);
+        if (_speechFrames < QualificationSpeechFrames) return new(AudioActivity.Speech, Array.Empty<byte[]>(), false);
         _open = true;
         var accepted = _candidate.ToArray(); _candidate.Clear();
         return new(AudioActivity.Speech, accepted, false);
