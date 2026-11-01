@@ -5,6 +5,17 @@ internal static class ControllerChecks
 {
     public static async Task RunAsync()
     {
+        var recordingSession = new FinalizingRecordingSession();
+        var recordingController = new CaptionController(new CaptionSettings { GeminiKey = "test" }, _ => recordingSession, action => action());
+        await recordingController.ToggleAsync();
+        var recordingPause = recordingController.PauseAsync();
+        Require(recordingController.State == CaptionState.Pausing && !recordingPause.IsCompleted,
+            "Pause completed before recording finalization.");
+        recordingSession.Saved.SetResult();
+        await recordingPause;
+        Require(recordingController.IsPaused && recordingController.Errors.Entries.Single().Message == "Recording finalization failed.",
+            "Recording finalization error disappeared during pause or stale caption diagnostics leaked.");
+        await recordingController.ShutdownAsync();
         await CheckUnreadInactivityAsync(burst: false);
         await CheckUnreadInactivityAsync(burst: true);
         var demo = new CaptionController(new CaptionSettings(), _ => throw new Exception("Demo opened a capture session"), a => a());
@@ -507,6 +518,23 @@ internal static class ControllerChecks
         public Task StartAsync(CancellationToken token = default) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
+    private sealed class FinalizingRecordingSession : ICaptionSession, ICaptionRecordingSession, ICaptionDiagnosticsSession
+    {
+        public readonly TaskCompletionSource Saved = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public event Action<string>? RecordingDiagnostic;
+        public event Action<string>? Diagnostic;
+        public event Action<CaptionUpdate>? Caption { add { } remove { } }
+        public event Action<string>? Status { add { } remove { } }
+        public event Action<string>? Ended { add { } remove { } }
+        public Task StartAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public async ValueTask DisposeAsync()
+        {
+            await Saved.Task;
+            Diagnostic?.Invoke("Stale live caption diagnostic.");
+            RecordingDiagnostic?.Invoke("Recording finalization failed.");
+        }
+    }
+
     private sealed class FakeSession : ICaptionSession, IAudioActivitySession, ICaptionDiagnosticsSession
     {
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

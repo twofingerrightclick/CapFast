@@ -6,7 +6,7 @@ using CapFast.Core;
 
 namespace CapFast.Speech;
 
-public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSession, IAudioActivitySession, ICaptionDiagnosticsSession, ILanguageAssignmentSession
+public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSession, IAudioActivitySession, ICaptionDiagnosticsSession, ICaptionRecordingSession, ILanguageAssignmentSession
 {
     private sealed record ReceivedSource(CaptionUpdate Update, SourceTranslationPipeline.ReceivedBlock Block, double ReceivedAt, string? Hint);
     private sealed class Connection : IDisposable
@@ -56,6 +56,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     private Task? _sendAudio;
     private Task? _readAudio;
     private Task? _monitorAudio;
+    private CaptionAudioRecorder? _recording;
     private int _started;
     private int _disposed;
     private int _ended;
@@ -68,6 +69,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     public void ResetLanguageDetection() => _pipeline?.ResetForNextUtterance();
     public void HintInputLanguage(string code) => _pipeline?.HintInputLanguage(code);
     public event Action<string>? Diagnostic;
+    public event Action<string>? RecordingDiagnostic;
     internal event Action? FinalSourceRegistered;
     public event Action<AudioActivity>? AudioActivityChanged;
     public event Action<CaptionUpdate>? Caption;
@@ -164,6 +166,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
                 _monitorAudio = MonitorAudioAsync(_microphone);
             }
             Status?.Invoke("Gemini connected — starting the selected audio input.");
+            _recording = new CaptionAudioRecorder(message => RecordingDiagnostic?.Invoke(message));
             _sendAudio = Task.Run(() => SendAudioAsync(_microphone));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -536,6 +539,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     {
         try
         {
+            await using var recording = _recording!;
             var framer = new PcmSpeechFramer(samples =>
             {
                 try { return _speechDetector!.Predict(samples); }
@@ -545,9 +549,14 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
                 if (!writer.TryWrite(frame))
                     throw new CaptionSessionException("Google connection recovery could not keep up with the audio. Capture paused before the bounded local queue overflowed.");
             });
+            void Consume(ReadOnlySpan<byte> pcm)
+            {
+                recording.Append(pcm);
+                framer.Append(pcm);
+            }
             if (OperatingSystem.IsWindows())
             {
-                await WindowsAudioCapture.RunAsync(_audioDeviceId, pcm => framer.Append(pcm), _lifetime.Token);
+                await WindowsAudioCapture.RunAsync(_audioDeviceId, pcm => Consume(pcm), _lifetime.Token);
                 return;
             }
             if (microphone is null) throw new CaptionSessionException("Mac audio helper is missing.");
@@ -560,7 +569,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
                 var length = await microphone.StandardOutput.BaseStream.ReadAsync(packet, timeout.Token);
                 if (length == 0) break;
                 first = false;
-                framer.Append(packet.AsSpan(0, length));
+                Consume(packet.AsSpan(0, length));
             }
             if (!_lifetime.IsCancellationRequested)
             {
@@ -741,6 +750,9 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
         lock (_sourceWorkers) sources = _sourceWorkers.ToArray();
         var completion = Task.WhenAll(new[] { _connection?.Receiver, _sendAudio, _readAudio, _monitorAudio }.OfType<Task>().Concat(sources));
         try { await completion.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
+        // Paused means the latest file is finalized and safe to copy. Caption
+        // transport teardown stays bounded; disk finalization remains awaited.
+        if (_recording is { } recording) await recording.DisposeAsync();
         _microphone?.Dispose();
         _connection?.Dispose();
         _blockTranslator?.Dispose();

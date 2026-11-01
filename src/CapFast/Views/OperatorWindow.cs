@@ -34,6 +34,8 @@ public sealed class SettingsWindow : Window
     private readonly StackPanel _googlePanel;
     private readonly Button _demo = new() { Content = "Preview sample captions", Padding = new Thickness(10, 5),
         VerticalAlignment = VerticalAlignment.Center };
+    private readonly Button _recordings = new() { Content = "View recordings", Padding = new Thickness(10, 5),
+        VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _pause = new() { Content = "▶ Start captions", HorizontalAlignment = HorizontalAlignment.Stretch,
         HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
         MinHeight = 72 };
@@ -193,7 +195,8 @@ public sealed class SettingsWindow : Window
         Avalonia.Automation.AutomationProperties.SetName(transcription, "Show transcription on audience screen");
         ToolTip.SetTip(transcription, "Click to show transcription · Enter or Space when focused");
         transcription.Click += (_, _) => controller.Slideshow.SetShowing(false);
-        var showing = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeight.Medium };
+        var showing = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeight.Medium,
+            TextWrapping = TextWrapping.Wrap };
         void UpdateSource()
         {
             SlideshowControls.SetOutputState(transcription, "Transcription", !controller.Slideshow.IsShowing);
@@ -215,8 +218,11 @@ public sealed class SettingsWindow : Window
             _languageConsole, _languageStatus, _resetLanguages, _pause, _clear,
             Label("Caption size"), _size, pacing
         } };
-        var outputActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8,
-            Children = { _demo, _fullscreen } };
+        var outputActions = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right,
+            Children = { _demo, _recordings, _fullscreen } };
+        _demo.Margin = _recordings.Margin = new Thickness(0, 0, 8, 0);
+        _recordings.Click += async (_, _) => await OpenRecordingsAsync();
+        ToolTip.SetTip(_recordings, "Open daily audio folders. Captions record the full input locally as lossless FLAC; pause captions before sharing the latest file.");
         var outputStatus = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12,
             Children = { showing, PlaceInColumn(outputActions, 1) } };
         ToolTip.SetTip(_fullscreen, "Toggle display fullscreen");
@@ -232,7 +238,12 @@ public sealed class SettingsWindow : Window
             Content = new StackPanel { Spacing = 12, Children = {
                 Label("Audio input"),
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _audio, _refreshAudio } },
-                _audioAvailability, _microphone, Label("Appearance"), _lightMode,
+                _audioAvailability, _microphone,
+                Label("Audio recordings"),
+                new TextBlock { Text = "While captions run, the full input is saved locally as lossless FLAC in daily folders, split every 30 minutes. Pause captions before sharing the latest file. Recordings stay until you delete them; nothing is sent automatically.",
+                    TextWrapping = TextWrapping.Wrap, FontSize = 12 },
+                new SelectableTextBlock { Text = CaptionAudioRecorder.RecordingsDirectory, TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .75 },
+                Label("Appearance"), _lightMode,
                 _notice, _configuration,
                 new TextBlock { Text = OperatingSystem.IsWindows()
                     ? "This local file is a plaintext fallback, used when no environment variable or saved key is available. Save API key above stores an encrypted key instead."
@@ -399,6 +410,29 @@ public sealed class SettingsWindow : Window
             _controller.Errors.Add(message);
         }
         finally { _openingFile = false; if (!_closed) Refresh(); }
+    }
+
+    private async Task OpenRecordingsAsync()
+    {
+        _recordings.IsEnabled = false;
+        try
+        {
+            var path = CaptionAudioRecorder.RecordingsDirectory;
+            await Task.Run(() => Directory.CreateDirectory(path));
+            if (_closed) return;
+            var info = new ProcessStartInfo { UseShellExecute = true };
+            if (OperatingSystem.IsMacOS())
+            {
+                info.FileName = "/usr/bin/open"; info.ArgumentList.Add(path);
+            }
+            else info.FileName = path;
+            using var process = Process.Start(info);
+        }
+        catch
+        {
+            if (!_closed) _controller.Errors.Add("Could not open recordings. Open the folder shown under Audio, appearance & configuration in your file manager and check folder access.");
+        }
+        finally { if (!_closed) _recordings.IsEnabled = true; }
     }
 
     private async Task ReloadConfigurationAsync()

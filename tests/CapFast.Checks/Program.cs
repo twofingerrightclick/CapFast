@@ -1,5 +1,15 @@
 using CapFast.Core;
 
+if (args.Length == 3 && args[0] == "--record-audio-fixture")
+{
+    AudioRecordingChecks.RecordFixture(args[1], args[2]);
+    return;
+}
+if (args.Length == 1 && args[0] == "--audio-recording-checks")
+{
+    await AudioRecordingChecks.RunAsync();
+    return;
+}
 if (args.Length >= 3 && args[0] == "--local-speech-report")
 {
     var reports = args.Skip(2).Select(path => LocalSpeechChecks.MeasurePcm(path)).ToArray();
@@ -18,6 +28,7 @@ if (args.Length > 0 && args[0] == "--local-speech-checks")
 LocalSpeechChecks.Run();
 
 AudioMonitorChecks.Run();
+await AudioRecordingChecks.RunAsync();
 SlideshowChecks.Run();
 
 if (args.Length == 1 && args[0] == "--configuration-checks")
