@@ -61,6 +61,8 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     private int _disposed;
     private int _ended;
     private readonly string? _audioDeviceId;
+    private readonly double _speechQualificationSeconds;
+    private readonly double _silenceResetSeconds;
     private CaptionSessionException? _failure;
 
     public LanguageAssignment? LanguageAssignment => _pipeline?.Assignment;
@@ -77,20 +79,27 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
     public event Action<string>? Ended;
     public event Action<CaptionFailure>? Failure;
 
-    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null)
-        : this(apiKey, audioDeviceId, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock()) { }
+    public GeminiCaptionSession(string apiKey, string? audioDeviceId = null,
+        double speechQualificationSeconds = SpeechAudioGate.DefaultSpeechQualificationSeconds,
+        double silenceResetSeconds = SpeechAudioGate.DefaultSilenceResetSeconds)
+        : this(apiKey, audioDeviceId, () => new WebSocketLiveTransport(apiKey.Trim()), new SystemLiveClock(),
+            speechQualificationSeconds: speechQualificationSeconds, silenceResetSeconds: silenceResetSeconds) { }
 
     internal GeminiCaptionSession(string apiKey, string? audioDeviceId,
         Func<ILiveTransport> transportFactory, ILiveClock clock,
         Func<string, CancellationToken, Task<string?>>? detectLanguage = null,
         Func<string, LanguageAssignment, CancellationToken, Task<(string Primary, string Secondary)>>? drainTranslate = null,
-        Func<string, string, string?, CancellationToken, Task<MultilingualCaptionResult>>? combinedTranslate = null)
+        Func<string, string, string?, CancellationToken, Task<MultilingualCaptionResult>>? combinedTranslate = null,
+        double speechQualificationSeconds = SpeechAudioGate.DefaultSpeechQualificationSeconds,
+        double silenceResetSeconds = SpeechAudioGate.DefaultSilenceResetSeconds)
     {
         if (string.IsNullOrWhiteSpace(apiKey)) throw new ArgumentException("A Gemini API key is required.");
         // Same header authentication used by Google's native Live SDK; no key in URLs/logs.
         _transportFactory = transportFactory;
         _clock = clock; _detectionOverride = detectLanguage;
         _audioDeviceId = audioDeviceId;
+        _speechQualificationSeconds = SpeechAudioGate.NormalizeSpeechQualification(speechQualificationSeconds);
+        _silenceResetSeconds = SpeechAudioGate.NormalizeSilenceReset(silenceResetSeconds);
         _useCombinedTranslation = combinedTranslate is not null || (detectLanguage is null && drainTranslate is null);
         if (_useCombinedTranslation)
         {
@@ -597,7 +606,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
 
     private async Task PumpAudioAsync(ChannelReader<ClassifiedAudioFrame> frames)
     {
-        var gate = new SpeechAudioGate();
+        var gate = new SpeechAudioGate(_speechQualificationSeconds, _silenceResetSeconds);
         var activity = AudioActivity.Idle;
         var recovering = false;
         var awaitingSpeechBlock = false;
@@ -610,7 +619,7 @@ public sealed class GeminiCaptionSession : ICaptionSession, ICaptionFailureSessi
                 // A fresh recognition stream makes even a previously unseen late
                 // final belong to the retired audio generation, never the next block.
                 if (_connection is { } expired) await CloseConnectionAsync(expired);
-                gate = new SpeechAudioGate();
+                gate = new SpeechAudioGate(_speechQualificationSeconds, _silenceResetSeconds);
                 awaitingSpeechBlock = true;
                 Status?.Invoke("Listening locally — Google reconnects when speech resumes.");
             }

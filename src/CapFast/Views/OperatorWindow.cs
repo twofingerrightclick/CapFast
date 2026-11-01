@@ -25,6 +25,8 @@ public sealed class SettingsWindow : Window
     private readonly TextBlock _googleDescription = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 };
     private readonly Slider _size = new() { Minimum = 28, Maximum = 72 };
     private readonly Slider _readingSpeed = new() { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true };
+    private readonly Slider _speechQualification = new();
+    private readonly Slider _silenceReset = new();
     private readonly CheckBox _catchUp = new() { Content = "Automatic caption catch-up" };
     private readonly TextBlock _displayQueue = new() { TextWrapping = TextWrapping.Wrap, FontSize = 13 };
     private readonly DispatcherTimer _displayQueueTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
@@ -116,7 +118,27 @@ public sealed class SettingsWindow : Window
         }
         _saveKey.Click += async (_, _) => await PersistGoogleKeyAsync(remove: false);
         _removeKey.Click += async (_, _) => await PersistGoogleKeyAsync(remove: true);
-        _configuration = new StackPanel { Spacing = 14, Children = { _googlePanel } };
+        var resetSpeechTimings = new Button { Content = "Restore tested defaults", HorizontalAlignment = HorizontalAlignment.Left };
+        resetSpeechTimings.Click += (_, _) =>
+        {
+            _speechQualification.Value = SpeechAudioGate.DefaultSpeechQualificationSeconds;
+            _silenceReset.Value = SpeechAudioGate.DefaultSilenceResetSeconds;
+        };
+        var speechTiming = new StackPanel { Spacing = 10, Children = {
+            Label("Speech buffering"),
+            SpeechTimingControl(_speechQualification, "Speech before first upload",
+                SpeechAudioGate.MinimumSpeechQualificationSeconds, SpeechAudioGate.MaximumSpeechQualificationSeconds,
+                () => controller.Settings.SpeechQualificationSeconds, value => controller.Settings.SpeechQualificationSeconds = value,
+                "Detected speech must total this duration before the buffered opening is sent. Pauses do not count."),
+            SpeechTimingControl(_silenceReset, "Silence before reset",
+                SpeechAudioGate.MinimumSilenceResetSeconds, SpeechAudioGate.MaximumSilenceResetSeconds,
+                () => controller.Settings.SilenceResetSeconds, value => controller.Settings.SilenceResetSeconds = value,
+                "Shorter pauses keep the buffered audio. Reaching this duration discards an unqualified opening or ends the current speech segment."),
+            new TextBlock { Text = "Pause captions to adjust. Saved automatically for the next start. Tested defaults: 2.0 s speech, 1.0 s silence.",
+                TextWrapping = TextWrapping.Wrap, FontSize = 12 },
+            resetSpeechTimings
+        } };
+        _configuration = new StackPanel { Spacing = 14, Children = { _googlePanel, speechTiming } };
         foreach (var code in new[] { "en", "sw", "fr" })
         {
             var language = code;
@@ -325,6 +347,27 @@ public sealed class SettingsWindow : Window
         _diagnostic.Text = controller.Settings.ConfigurationError ?? "";
         RefreshDiagnostics();
         Refresh();
+    }
+
+    private Control SpeechTimingControl(Slider slider, string title, double minimum, double maximum,
+        Func<double> get, Action<double> set, string description)
+    {
+        slider.Minimum = minimum; slider.Maximum = maximum;
+        slider.TickFrequency = slider.SmallChange = .1; slider.LargeChange = .5;
+        slider.IsSnapToTickEnabled = true; slider.Value = get();
+        Avalonia.Automation.AutomationProperties.SetName(slider, title + ", seconds");
+        ToolTip.SetTip(slider, description);
+        var label = new TextBlock { Text = $"{title}: {get():0.0} s", FontWeight = FontWeight.Medium };
+        slider.PropertyChanged += (_, e) =>
+        {
+            if (e.Property != Slider.ValueProperty || !_controller.IsPaused) return;
+            set(slider.Value);
+            label.Text = $"{title}: {get():0.0} s";
+            _controller.SettingsChanged(); SchedulePreferencesSave();
+        };
+        return new StackPanel { Spacing = 6, Children = {
+            label, slider, new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, FontSize = 12 }
+        } };
     }
 
     private Control LanguageSpeedControl(string language, Func<int?> get, Action<int?> set)

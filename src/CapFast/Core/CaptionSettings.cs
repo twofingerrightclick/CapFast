@@ -70,6 +70,18 @@ public sealed class CaptionSettings
     }) ?? ReadingWordsPerMinute;
 
     internal static int? ValidReadingSpeedOverride(int? value) => value is >= 80 and <= 300 ? value : null;
+    private double _speechQualificationSeconds = SpeechAudioGate.DefaultSpeechQualificationSeconds;
+    private double _silenceResetSeconds = SpeechAudioGate.DefaultSilenceResetSeconds;
+    public double SpeechQualificationSeconds
+    {
+        get => _speechQualificationSeconds;
+        set => _speechQualificationSeconds = SpeechAudioGate.NormalizeSpeechQualification(value);
+    }
+    public double SilenceResetSeconds
+    {
+        get => _silenceResetSeconds;
+        set => _silenceResetSeconds = SpeechAudioGate.NormalizeSilenceReset(value);
+    }
     public string AudioDeviceId { get; set; } = "";
     public CaptionSettings Copy() => (CaptionSettings)MemberwiseClone();
 }

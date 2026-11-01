@@ -57,8 +57,11 @@ public sealed class App : Application
                 EnglishReadingWordsPerMinute = saved.EnglishReadingWordsPerMinute,
                 SwahiliReadingWordsPerMinute = saved.SwahiliReadingWordsPerMinute,
                 FrenchReadingWordsPerMinute = saved.FrenchReadingWordsPerMinute,
-                AutomaticCaptionCatchUp = saved.AutomaticCaptionCatchUp
-            }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId),
+                AutomaticCaptionCatchUp = saved.AutomaticCaptionCatchUp,
+                SpeechQualificationSeconds = saved.SpeechQualificationSeconds,
+                SilenceResetSeconds = saved.SilenceResetSeconds
+            }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId,
+                settings.SpeechQualificationSeconds, settings.SilenceResetSeconds),
                 action => Dispatcher.UIThread.Post(action));
             _controller.Changed += ApplyAppearance;
             _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>

@@ -4,7 +4,9 @@ namespace CapFast.Core;
 
 public sealed record CaptionPreferences(string AudioDeviceId, double FontSize, int ReadingWordsPerMinute,
     int? EnglishReadingWordsPerMinute = null, int? SwahiliReadingWordsPerMinute = null,
-    int? FrenchReadingWordsPerMinute = null, bool AutomaticCaptionCatchUp = true)
+    int? FrenchReadingWordsPerMinute = null, bool AutomaticCaptionCatchUp = true,
+    double SpeechQualificationSeconds = SpeechAudioGate.DefaultSpeechQualificationSeconds,
+    double SilenceResetSeconds = SpeechAudioGate.DefaultSilenceResetSeconds)
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -33,7 +35,9 @@ public sealed record CaptionPreferences(string AudioDeviceId, double FontSize, i
                 CaptionSettings.ValidReadingSpeedOverride(saved.EnglishReadingWordsPerMinute),
                 CaptionSettings.ValidReadingSpeedOverride(saved.SwahiliReadingWordsPerMinute),
                 CaptionSettings.ValidReadingSpeedOverride(saved.FrenchReadingWordsPerMinute),
-                saved.AutomaticCaptionCatchUp);
+                saved.AutomaticCaptionCatchUp,
+                SpeechAudioGate.NormalizeSpeechQualification(saved.SpeechQualificationSeconds),
+                SpeechAudioGate.NormalizeSilenceReset(saved.SilenceResetSeconds));
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
         { return Default; }
@@ -48,7 +52,8 @@ public sealed record CaptionPreferences(string AudioDeviceId, double FontSize, i
         {
             var preferences = new CaptionPreferences(settings.AudioDeviceId, settings.FontSize, settings.ReadingWordsPerMinute,
                 settings.EnglishReadingWordsPerMinute, settings.SwahiliReadingWordsPerMinute,
-                settings.FrenchReadingWordsPerMinute, settings.AutomaticCaptionCatchUp);
+                settings.FrenchReadingWordsPerMinute, settings.AutomaticCaptionCatchUp,
+                settings.SpeechQualificationSeconds, settings.SilenceResetSeconds);
             File.WriteAllText(temporary, JsonSerializer.Serialize(preferences, JsonOptions));
             File.Move(temporary, path, overwrite: true);
         }

@@ -72,15 +72,46 @@ public static class SpeechAudioGateChecks
         for (var i = 0; i < 19; i++) gate.Process(Frame(i), AudioFrameKind.Speech);
         for (var i = 0; i < 10; i++) gate.Process(Frame(0), AudioFrameKind.Quiet);
         Check(gate.Process(Frame(0), AudioFrameKind.Speech).Audio.Count == 0, "Separate short utterances combined across a long pause.");
-        gate.Reset();
-        for (var i = 0; i < 100; i++)
-        {
-            Check(gate.Process(Frame(i), AudioFrameKind.Speech).Audio.Count == 0,
-                "Sparse speech bypassed the bounded candidate buffer.");
-            for (var j = 0; j < 9; j++) gate.Process(Frame(0), AudioFrameKind.Quiet);
-        }
         try { gate.Process(new byte[1], AudioFrameKind.Speech); throw new Exception("Malformed frame accepted."); }
         catch (InvalidDataException) { }
+        var shorter = new SpeechAudioGate(1.5, .4);
+        for (var i = 0; i < 14; i++)
+            Check(shorter.Process(Frame(i), AudioFrameKind.Speech).Audio.Count == 0,
+                "Configured qualification uploaded speech too early.");
+        Check(shorter.Process(Frame(14), AudioFrameKind.Speech).Audio.Count == 15,
+            "Configured qualification was ignored.");
+        for (var i = 0; i < 3; i++)
+            Check(!shorter.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "Configured silence reset fired early.");
+        Check(shorter.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "Configured silence reset was ignored.");
+        var longer = new SpeechAudioGate(4, 3);
+        for (var i = 0; i < 39; i++)
+            Check(longer.Process(Frame(i), AudioFrameKind.Speech).Audio.Count == 0,
+                "Maximum speech qualification uploaded early.");
+        Check(longer.Process(Frame(39), AudioFrameKind.Speech).Audio.Count == 40,
+            "Maximum speech qualification did not open.");
+        for (var i = 0; i < 29; i++)
+            Check(!longer.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "Maximum silence reset fired early.");
+        Check(longer.Process(Frame(0), AudioFrameKind.Quiet).EndStream, "Maximum silence reset did not end speech.");
+        longer.Reset();
+        var longestOpening = new List<byte>();
+        for (var i = 0; i < 40; i++)
+        {
+            longestOpening.Add((byte)i);
+            var decision = longer.Process(Frame(i), AudioFrameKind.Speech);
+            if (i < 39)
+            {
+                Check(decision.Audio.Count == 0, "Pauses counted toward the configured four speech seconds.");
+                for (var j = 0; j < 29; j++)
+                {
+                    longestOpening.Add(100);
+                    Check(longer.Process(Frame(100), AudioFrameKind.Quiet).Audio.Count == 0,
+                        "Quiet frames bypassed the configured speech requirement.");
+                }
+            }
+            else Check(decision.Audio.Count == 1171 && decision.Audio.Count == longer.MaximumBufferedFrames
+                && decision.Audio.Select(frame => frame[0]).SequenceEqual(longestOpening),
+                "The buffer cap discarded or reordered a valid opening at the maximum configured timings.");
+        }
         Console.WriteLine("Speech gate checks passed: silence, two-second qualification, opening audio, short pauses, stream end, and bounds.");
     }
     private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); }

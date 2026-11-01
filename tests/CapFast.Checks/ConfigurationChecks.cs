@@ -42,6 +42,7 @@ internal static class ConfigurationChecks
                     AudioDeviceId = "BlackHole2ch_UID", FontSize = 60, ReadingWordsPerMinute = 230,
                     EnglishReadingWordsPerMinute = 200, SwahiliReadingWordsPerMinute = 160,
                     FrenchReadingWordsPerMinute = 190, AutomaticCaptionCatchUp = false,
+                    SpeechQualificationSeconds = 1.5, SilenceResetSeconds = 1.2,
                     GeminiKey = "secret-must-not-be-saved"
                 };
                 CaptionPreferences.Save(saved, preferencesFile);
@@ -49,7 +50,8 @@ internal static class ConfigurationChecks
                 if (reloaded.AudioDeviceId != saved.AudioDeviceId || reloaded.FontSize != saved.FontSize
                     || reloaded.ReadingWordsPerMinute != saved.ReadingWordsPerMinute
                     || reloaded.EnglishReadingWordsPerMinute != 200 || reloaded.SwahiliReadingWordsPerMinute != 160
-                    || reloaded.FrenchReadingWordsPerMinute != 190 || reloaded.AutomaticCaptionCatchUp)
+                    || reloaded.FrenchReadingWordsPerMinute != 190 || reloaded.AutomaticCaptionCatchUp
+                    || reloaded.SpeechQualificationSeconds != 1.5 || reloaded.SilenceResetSeconds != 1.2)
                     throw new Exception("Audio input or caption display preferences did not survive reload.");
                 if (File.ReadAllText(preferencesFile).Contains(saved.GeminiKey))
                     throw new Exception("API key leaked into caption preferences.");
@@ -58,7 +60,8 @@ internal static class ConfigurationChecks
                 var legacy = CaptionPreferences.Load(preferencesFile);
                 if (legacy.AudioDeviceId != "old-input" || legacy.FontSize != 52 || legacy.ReadingWordsPerMinute != 210
                     || legacy.EnglishReadingWordsPerMinute is not null || legacy.SwahiliReadingWordsPerMinute is not null
-                    || legacy.FrenchReadingWordsPerMinute is not null || !legacy.AutomaticCaptionCatchUp)
+                    || legacy.FrenchReadingWordsPerMinute is not null || !legacy.AutomaticCaptionCatchUp
+                    || legacy.SpeechQualificationSeconds != 2 || legacy.SilenceResetSeconds != 1)
                     throw new Exception("Older saved preferences lost shared settings or did not enable the new defaults.");
                 File.WriteAllText(preferencesFile,
                     """{"audioDeviceId":"input","fontSize":48,"readingWordsPerMinute":210,"englishReadingWordsPerMinute":79,"swahiliReadingWordsPerMinute":301,"frenchReadingWordsPerMinute":null,"automaticCaptionCatchUp":false}""");
@@ -92,6 +95,30 @@ internal static class ConfigurationChecks
                 if (inherited.EnglishReadingWordsPerMinute is not null || inherited.SwahiliReadingWordsPerMinute is not null
                     || inherited.FrenchReadingWordsPerMinute is not null || !inherited.AutomaticCaptionCatchUp)
                     throw new Exception("Inherited reading speeds or enabled catch-up did not survive reload.");
+                File.WriteAllText(preferencesFile,
+                    """{"audioDeviceId":"input","fontSize":48,"readingWordsPerMinute":210,"speechQualificationSeconds":0,"silenceResetSeconds":99}""");
+                var invalidTiming = CaptionPreferences.Load(preferencesFile);
+                if (invalidTiming.SpeechQualificationSeconds != 2 || invalidTiming.SilenceResetSeconds != 1
+                    || invalidTiming.ReadingWordsPerMinute != 210 || invalidTiming.AudioDeviceId != "input")
+                    throw new Exception("Invalid speech timings lost valid preferences or failed to use tested defaults.");
+                var timing = new CaptionSettings(loadLocalConfiguration: false)
+                    { SpeechQualificationSeconds = .5, SilenceResetSeconds = 3 };
+                var timingCopy = timing.Copy();
+                timing.SpeechQualificationSeconds = 4;
+                timing.SilenceResetSeconds = .2;
+                CaptionPreferences.Save(timing, preferencesFile);
+                var timingLimits = CaptionPreferences.Load(preferencesFile);
+                if (timingLimits.SpeechQualificationSeconds != 4 || timingLimits.SilenceResetSeconds != .2
+                    || timingCopy.SpeechQualificationSeconds != .5 || timingCopy.SilenceResetSeconds != 3)
+                    throw new Exception("Speech timing limits did not persist or the session snapshot changed after an edit.");
+                timing.SpeechQualificationSeconds = 1.56;
+                timing.SilenceResetSeconds = .56;
+                if (timing.SpeechQualificationSeconds != 1.6 || timing.SilenceResetSeconds != .6)
+                    throw new Exception("Speech timing values did not align to classified 100 ms frames.");
+                timing.SpeechQualificationSeconds = double.NaN;
+                timing.SilenceResetSeconds = double.PositiveInfinity;
+                if (timing.SpeechQualificationSeconds != 2 || timing.SilenceResetSeconds != 1)
+                    throw new Exception("Non-finite speech timings did not fall back to tested defaults.");
                 File.WriteAllText(preferencesFile, "{broken");
                 if (CaptionPreferences.Load(preferencesFile) != CaptionPreferences.Default)
                     throw new Exception("Invalid caption preferences did not use defaults.");

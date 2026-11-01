@@ -9,8 +9,35 @@ For example, one second of speech, a half-second pause, and another second of
 speech now qualify. The entire 2.5-second buffered sequence is released once,
 including the pause, in original PCM order. Quiet time never counts toward the
 two-second speech requirement. A full second of classified quiet still clears an
-unqualified candidate or ends an open segment. The existing 80-frame candidate
-limit remains; buffering is bounded, not indefinite.
+unqualified candidate or ends an open segment. The initial tuning retained the
+80-frame candidate limit; the configurable-settings follow-up below replaces it
+with a bound derived from the selected timings.
+
+## Configurable settings and review
+
+The existing Settings configuration expander now has a Speech buffering section
+beneath the API section. Speech before first upload accepts 0.5–4.0 seconds;
+Silence before reset accepts 0.2–3.0 seconds. Both use 100 ms steps, save to
+`settings.json`, and restore on launch. Controls are disabled during capture;
+changes apply when captions next start. Restore tested defaults selects 2.0/1.0.
+Older settings files and invalid values retain those defaults.
+
+The requested Terra review found that a fixed eight-second candidate cap could
+discard legitimate audio with longer custom timings. The bound is now
+`Q + (Q - 1) * (R - 1)` frames, where Q is the required speech frames and R is
+the quiet-reset frames. It retains every tolerated gap before qualification,
+while remaining bounded (191 frames at defaults, at most 1171 frames / about
+3.75 MB of PCM at maximum settings). The reporting ring uses the same capacity.
+Regression checks preserve an entire 1171-frame opening with four speech seconds
+and 2.9-second gaps; custom settings also survive five-second stream resets.
+Terra's follow-up review reported no remaining actionable bugs in this scope.
+
+The full executable checks and application build pass. Fresh default-setting
+inference on all 45 inputs still produces 2.50% English and 1.23% Swahili gate
+loss, with no increased loss on any fixture and zero approved silence/noise/tone.
+This follow-up is in `artifacts/qa/speech-settings-defaults-2026-11-01/`.
+The native Settings accessibility tree confirms the controls below the API
+section; screenshot capture remains unavailable through the UI automation host.
 
 ## Measurement and selection
 
@@ -90,8 +117,8 @@ mistakes for quiet. These replays do not call Google or capture Windows hardware
 The under-3% target passes for both full talks and the aggregate, not every short
 clip. The 12-second middle-English excerpt still loses 3.0/6.2 speech seconds
 (48.39%), and the alternating playlists lose about 6.1%. Short speech segments
-separated by at least one second of quiet, unfinished candidates at file end,
-and the bounded-candidate safeguard can still withhold audio. Preserving every
+separated by at least one second of quiet and unfinished candidates at file end
+can still lose audio. Preserving every
 isolated reply would require a separate change to the two-second qualification
 policy. A live listening test remains necessary to evaluate recognition,
 translation, finalization timing, and perceived caption continuity.

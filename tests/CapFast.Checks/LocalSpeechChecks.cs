@@ -63,7 +63,7 @@ internal static class LocalSpeechChecks
     {
         using var detector = predict is null ? new SileroSpeechDetector() : null;
         var gate = new SpeechAudioGate();
-        var recent = new byte[80][];
+        var recent = new byte[gate.MaximumBufferedFrames][];
         var kinds = new List<bool>();
         var uploaded = new List<bool>();
         var opens = new List<double>();
