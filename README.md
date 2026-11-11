@@ -1,5 +1,7 @@
 # CapFast
 
+![CapFast Settings and audience caption windows on a purple gradient background](docs/images/capfast-showcase.png)
+
 A small Avalonia/.NET desktop prototype for live seminar captions. Google transcription and translation detects each emitted speech segment’s input language and translates it into the other two among English, Swahili and French. Other input languages produce English and French. The audience window shows two caption surfaces on a dark or light background.
 
 ## Run on a Mac
