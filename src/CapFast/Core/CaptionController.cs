@@ -191,6 +191,13 @@ public sealed class CaptionController
                         if (generation != _generation || !_wantLive) return;
                         Errors.Add(message); Changed?.Invoke();
                     });
+                if (session is ICaptionRecordingSession recording)
+                    recording.RecordingDiagnostic += message => _dispatch(() =>
+                    {
+                        // Finalization runs after StopAsync invalidates caption
+                        // callbacks; retain storage failures from that session.
+                        Errors.Add(message); Changed?.Invoke();
+                    });
                 session.Caption += update => _dispatch(() =>
                 {
                     if (generation == _generation && _wantLive &&

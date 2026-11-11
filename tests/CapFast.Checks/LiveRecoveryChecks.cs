@@ -309,6 +309,7 @@ public static class LiveRecoveryChecks
     }
     public static async Task RunAsync()
     {
+        await CheckConfiguredGateSurvivesStreamResetAsync();
         await CheckMixedUtteranceSegmentsAsync();
         await CheckHintPersistsThroughFinalAsync();
         await CheckBlockedDetectionSkipsSegmentAsync();
@@ -470,6 +471,31 @@ public static class LiveRecoveryChecks
         Check(factoryCalls == 2 && first.Audio.Count == 1 && cancellable.Sends == 0, "Pause allowed reconnect or queued audio to continue.");
         Console.WriteLine("Live recovery checks passed: rollover, goAway, ordered audio, uncertain-send notice, terminal errors, bounded backoff, and pause cancellation.");
     }
+    private static async Task CheckConfiguredGateSurvivesStreamResetAsync()
+    {
+        var clock = new Clock();
+        var sockets = new List<Transport>();
+        await using var session = new GeminiCaptionSession("fake-test-key", null, () =>
+        {
+            var socket = new Transport(); sockets.Add(socket);
+            if (sockets.Count == 1)
+                socket.AudioSent = t => { if (t.Audio.Count == 15) clock.Now = 5; return Task.CompletedTask; };
+            return socket;
+        }, clock, speechQualificationSeconds: 1.5, silenceResetSeconds: .4);
+        var frames = Channel.CreateUnbounded<ClassifiedAudioFrame>();
+        for (var i = 0; i < 15; i++) frames.Writer.TryWrite(Frame(i));
+        frames.Writer.TryWrite(Frame(99, AudioFrameKind.Quiet));
+        for (var i = 15; i < 30; i++) frames.Writer.TryWrite(Frame(i));
+        for (var i = 0; i < 4; i++) frames.Writer.TryWrite(Frame(99, AudioFrameKind.Quiet));
+        frames.Writer.Complete();
+        await session.RunClassifiedAudioAsync(frames.Reader);
+        Check(sockets.Count == 2 && sockets.All(socket => socket.Audio.Count == 15)
+            && sockets.SelectMany(socket => socket.Audio).Select(bytes => BitConverter.ToInt32(bytes))
+                .SequenceEqual(Enumerable.Range(0, 30)),
+            "Configured speech qualification was lost at startup or after a five-second stream reset.");
+        Check(sockets[1].EndMarkers == 1, "Configured silence reset was lost when the speech gate was recreated.");
+    }
+
     private static async Task CheckMixedUtteranceSegmentsAsync()
     {
         var socket = new Transport();

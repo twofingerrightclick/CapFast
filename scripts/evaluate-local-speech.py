@@ -17,8 +17,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path, help='New directory for PCM derivatives and reports')
     parser.add_argument('--full-talks', action='store_true', help='Also replay both complete supplied MP4 talks')
+    parser.add_argument('--max-full-talk-loss-percent', type=float, default=3.0,
+                        help='Fail if either full talk loses this percentage of detected speech or more (default: 3)')
     parser.add_argument('--ffmpeg', help='ffmpeg binary; defaults to PATH or repository imageio-ffmpeg')
     args = parser.parse_args()
+    if not math.isfinite(args.max_full_talk_loss_percent) or not 0 < args.max_full_talk_loss_percent <= 100:
+        parser.error('--max-full-talk-loss-percent must be greater than zero and at most 100')
     output = args.output.resolve()
     if output.exists():
         raise SystemExit('Output already exists; choose a new directory to preserve previous results.')
@@ -96,9 +100,21 @@ def main():
         rows.append(f'| {fixture["group"]} | {Path(result["file"]).stem} | {result["durationSeconds"]:.2f} | {level} | {result["speechSeconds"]:.1f} | {result["uploadedSeconds"]:.1f} | {result["speechWithheldSeconds"]:.1f} |')
     (output/'report.md').write_text('\n'.join(rows)+'\n')
     failures = [Path(r['file']).name for f,r in zip(fixtures,results) if f['group']=='Non-speech control' and r['uploadedSeconds'] > 0]
+    retention_failures = []
+    for fixture, result in zip(fixtures, results):
+        if fixture['group'] != 'Full talk':
+            continue
+        speech = result['speechSeconds']
+        loss = 100 * result['speechWithheldSeconds'] / speech if speech else 100
+        print(f'{Path(result["file"]).name}: {loss:.2f}% detected speech withheld '
+              f'(target < {args.max_full_talk_loss_percent:g}%)')
+        if loss >= args.max_full_talk_loss_percent:
+            retention_failures.append(Path(result['file']).name)
     print(f'Report: {output / "report.md"}')
     if failures:
         raise SystemExit('Non-speech controls passed audio through the gate: '+', '.join(failures))
+    if retention_failures:
+        raise SystemExit('Full talks exceeded the detected-speech loss budget: '+', '.join(retention_failures))
 
 
 if __name__ == '__main__':

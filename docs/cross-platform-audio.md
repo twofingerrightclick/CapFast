@@ -14,8 +14,9 @@ byte boundaries, including split samples. Silero processes contiguous 512-sample
 windows, preserving recurrent state and 64 samples of context. A probability
 of at least 0.5 marks a window as speech; any overlap marks a 100 ms gate frame
 as speech. The original PCM is emitted unchanged. Classification adds at most
-32 ms of chunk alignment delay; the existing two-second speech qualification
-and 400 ms quiet timeout still apply. A final incomplete window/frame is
+32 ms of chunk alignment delay. Speech must accumulate two seconds before upload;
+gaps shorter than one second retain the candidate and its original PCM. One
+second of classified quiet resets qualification or ends an open stream. A final incomplete window/frame is
 discarded on stop, never padded or uploaded after pause.
 
 Windows capture has a bounded 200-callback queue; classified audio retains the
@@ -28,7 +29,10 @@ session; pause and restart after changing the system default device.
 ## Packaging
 
 - `bash scripts/publish-macos.sh [osx-arm64|osx-x64]` builds and signs the native helper.
-- `pwsh scripts/publish-windows.ps1 [-Runtime win-x64|win-arm64]` publishes a self-contained folder.
+- `pwsh scripts/publish-windows.ps1 [-Runtime win-x64|win-arm64]` publishes a self-contained folder
+  at `artifacts/windows/<runtime>/YYYY-MM-DD-HHmmss/`. Its executable is named
+  `CapFast-YYYY-MM-DD-HHmmss.exe` using local build time, which also identifies
+  the product version. Keep each build's files together when distributing updates.
 - Distribute the entire output including `Models/silero_vad.onnx`, ONNX Runtime
   native libraries, and licenses. Windows may require the Microsoft Visual C++
   2015–2022 Redistributable for its architecture.
@@ -44,7 +48,7 @@ session; pause and restart after changing the system default device.
 
 ## Validation
 
-The [45-case sample-audio sweep](local-speech-validation.md) covers the complete English/Swahili talks, quiet FLEURS recordings, alternating playlists, and negative controls. It found significant detected speech withheld by the retained two-second gate; see the results before treating smoke-test success as caption coverage.
+The [45-case sample-audio sweep](local-speech-validation.md) covers the complete English/Swahili talks, quiet FLEURS recordings, alternating playlists, and negative controls. The [one-second pause allowance](speech-pause-retention-validation.md) reduces full-talk gate loss to 2.50% for English and 1.23% for Swahili while preserving two-second speech qualification. Some short clips still exceed 3%; see the measured limits before treating smoke-test success as caption coverage.
 
 Run `dotnet run --project tests/CapFast.Checks` for regression checks, including
 real ONNX inference on silence and state reset, byte-exact framing, and the

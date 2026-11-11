@@ -1,5 +1,11 @@
 # Silero sample-audio validation — October 25, 2026
 
+**Follow-up, November 1:** the two-second qualification remains, but the quiet
+reset is now one second. Fresh replay reduced full-talk gate loss to 2.50% for
+English and 1.23% for Swahili. See [pause-retention validation](speech-pause-retention-validation.md)
+for the change, regression checks, and remaining short-clip losses. The results
+below describe the original 400 ms reset.
+
 The local detector works on the supplied recordings, but the retained two-second
 speech gate discards substantial amounts of audio that Silero labels as speech.
 The complete English talk loses 78.0 seconds of detected speech at the gate

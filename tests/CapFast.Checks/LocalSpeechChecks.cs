@@ -43,6 +43,13 @@ internal static class LocalSpeechChecks
             var measured = System.Text.Json.JsonSerializer.SerializeToElement(MeasurePcm(fixture,
                 _ => ++window <= 50 || window is > 75 and <= 150 ? 0.9f : 0.1f));
             Check(measured.GetProperty("speechSeconds").GetDouble() == 4.0
+                && measured.GetProperty("uploadedSeconds").GetDouble() == 4.8
+                && measured.GetProperty("speechWithheldSeconds").GetDouble() == 0,
+                "A sub-second pause discarded speech or lost buffered PCM in the production framer/gate.");
+            window = 0;
+            measured = System.Text.Json.JsonSerializer.SerializeToElement(MeasurePcm(fixture,
+                _ => ++window <= 50 || window is > 100 and <= 175 ? 0.9f : 0.1f));
+            Check(measured.GetProperty("speechSeconds").GetDouble() == 4.0
                 && measured.GetProperty("uploadedSeconds").GetDouble() == 2.4
                 && measured.GetProperty("speechWithheldSeconds").GetDouble() == 1.6,
                 "Replay report did not distinguish discarded short speech from qualified speech.");
@@ -56,7 +63,7 @@ internal static class LocalSpeechChecks
     {
         using var detector = predict is null ? new SileroSpeechDetector() : null;
         var gate = new SpeechAudioGate();
-        var recent = new byte[80][];
+        var recent = new byte[gate.MaximumBufferedFrames][];
         var kinds = new List<bool>();
         var uploaded = new List<bool>();
         var opens = new List<double>();

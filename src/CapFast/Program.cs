@@ -57,8 +57,11 @@ public sealed class App : Application
                 EnglishReadingWordsPerMinute = saved.EnglishReadingWordsPerMinute,
                 SwahiliReadingWordsPerMinute = saved.SwahiliReadingWordsPerMinute,
                 FrenchReadingWordsPerMinute = saved.FrenchReadingWordsPerMinute,
-                AutomaticCaptionCatchUp = saved.AutomaticCaptionCatchUp
-            }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId),
+                AutomaticCaptionCatchUp = saved.AutomaticCaptionCatchUp,
+                SpeechQualificationSeconds = saved.SpeechQualificationSeconds,
+                SilenceResetSeconds = saved.SilenceResetSeconds
+            }, settings => new GeminiCaptionSession(settings.GeminiKey, settings.AudioDeviceId,
+                settings.SpeechQualificationSeconds, settings.SilenceResetSeconds),
                 action => Dispatcher.UIThread.Post(action));
             _controller.Changed += ApplyAppearance;
             _captions = new CaptionWindow(_controller) { OpenSettings = ShowSettings, CloseSecondaryWindows = () =>
@@ -86,6 +89,7 @@ public sealed class App : Application
         if (_controller is not { } controller || _captions is not { } captions) return;
         var settings = controller.Settings;
         var originalGoogle = settings.GeminiKey;
+        var originalRevision = settings.GoogleKeyRevision;
         // Path discovery and file reads can wait for macOS authorization. Keep
         // both off the UI thread so the caption window is already usable.
         try
@@ -100,7 +104,7 @@ public sealed class App : Application
             }
             var local = await read;
             if (!captions.IsVisible) return;
-            settings.ApplyLocalConfiguration(local, originalGoogle);
+            settings.ApplyLocalConfiguration(local, originalGoogle, originalRevision);
             if (local.Error is { } error) controller.Errors.Add(error);
             controller.NotifyLocalConfigurationLoaded();
         }

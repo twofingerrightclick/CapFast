@@ -17,9 +17,16 @@ public sealed class SettingsWindow : Window
     private readonly CheckBox _lightMode = new() { Content = "Light mode" };
     private readonly StackPanel _configuration;
     private readonly TextBox _gemini = new() { IsVisible = false, PasswordChar = '●' };
+    private readonly SavedGoogleKeyStore _savedGoogleKey = new();
+    private readonly Button _saveKey = new() { Content = "Save API key" };
+    private readonly Button _removeKey = new() { Content = "Remove saved key" };
+    private readonly TextBlock _keyStatus = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12 };
+    private bool _persistingKey;
     private readonly TextBlock _googleDescription = new() { TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .7 };
     private readonly Slider _size = new() { Minimum = 28, Maximum = 72 };
     private readonly Slider _readingSpeed = new() { Minimum = 80, Maximum = 300, TickFrequency = 10, IsSnapToTickEnabled = true };
+    private readonly Slider _speechQualification = new();
+    private readonly Slider _silenceReset = new();
     private readonly CheckBox _catchUp = new() { Content = "Automatic caption catch-up" };
     private readonly TextBlock _displayQueue = new() { TextWrapping = TextWrapping.Wrap, FontSize = 13 };
     private readonly DispatcherTimer _displayQueueTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
@@ -28,6 +35,8 @@ public sealed class SettingsWindow : Window
     private readonly TextBlock _notice = new() { TextWrapping = TextWrapping.Wrap, Opacity = .75 };
     private readonly StackPanel _googlePanel;
     private readonly Button _demo = new() { Content = "Preview sample captions", Padding = new Thickness(10, 5),
+        VerticalAlignment = VerticalAlignment.Center };
+    private readonly Button _recordings = new() { Content = "View recordings", Padding = new Thickness(10, 5),
         VerticalAlignment = VerticalAlignment.Center };
     private readonly Button _pause = new() { Content = "▶ Start captions", HorizontalAlignment = HorizontalAlignment.Stretch,
         HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
@@ -64,6 +73,7 @@ public sealed class SettingsWindow : Window
     private bool _closed;
     private bool _reloadingFile;
     private Task<LocalConfiguration>? _reloadRead;
+    private long _reloadRevision;
     private string? _reloadPath;
     private bool _openingFile;
     private Task? _prepareFile;
@@ -97,7 +107,38 @@ public sealed class SettingsWindow : Window
             new TextBlock { Text = "Pause captions when music plays. Resume when speech begins.",
                 TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
             Label("Gemini API key"), editGoogleKey, _gemini } };
-        _configuration = new StackPanel { Spacing = 14, Children = { _googlePanel } };
+        if (OperatingSystem.IsWindows())
+        {
+            _googlePanel.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10,
+                Children = { _saveKey, _removeKey } });
+            _keyStatus.Text = "Save API key keeps this key encrypted for your Windows account. Unsaved edits last until the app closes." + EnvironmentKeyNotice;
+            Avalonia.Automation.AutomationProperties.SetName(_gemini, "Gemini API key");
+            Avalonia.Automation.AutomationProperties.SetLiveSetting(_keyStatus, Avalonia.Automation.AutomationLiveSetting.Polite);
+            _googlePanel.Children.Add(_keyStatus);
+        }
+        _saveKey.Click += async (_, _) => await PersistGoogleKeyAsync(remove: false);
+        _removeKey.Click += async (_, _) => await PersistGoogleKeyAsync(remove: true);
+        var resetSpeechTimings = new Button { Content = "Restore tested defaults", HorizontalAlignment = HorizontalAlignment.Left };
+        resetSpeechTimings.Click += (_, _) =>
+        {
+            _speechQualification.Value = SpeechAudioGate.DefaultSpeechQualificationSeconds;
+            _silenceReset.Value = SpeechAudioGate.DefaultSilenceResetSeconds;
+        };
+        var speechTiming = new StackPanel { Spacing = 10, Children = {
+            Label("Speech buffering"),
+            SpeechTimingControl(_speechQualification, "Speech before first upload",
+                SpeechAudioGate.MinimumSpeechQualificationSeconds, SpeechAudioGate.MaximumSpeechQualificationSeconds,
+                () => controller.Settings.SpeechQualificationSeconds, value => controller.Settings.SpeechQualificationSeconds = value,
+                "Detected speech must total this duration before the buffered opening is sent. Pauses do not count."),
+            SpeechTimingControl(_silenceReset, "Silence before reset",
+                SpeechAudioGate.MinimumSilenceResetSeconds, SpeechAudioGate.MaximumSilenceResetSeconds,
+                () => controller.Settings.SilenceResetSeconds, value => controller.Settings.SilenceResetSeconds = value,
+                "Shorter pauses keep the buffered audio. Reaching this duration discards an unqualified opening or ends the current speech segment."),
+            new TextBlock { Text = "Pause captions to adjust. Saved automatically for the next start. Tested defaults: 2.0 s speech, 1.0 s silence.",
+                TextWrapping = TextWrapping.Wrap, FontSize = 12 },
+            resetSpeechTimings
+        } };
+        _configuration = new StackPanel { Spacing = 14, Children = { _googlePanel, speechTiming } };
         foreach (var code in new[] { "en", "sw", "fr" })
         {
             var language = code;
@@ -176,7 +217,8 @@ public sealed class SettingsWindow : Window
         Avalonia.Automation.AutomationProperties.SetName(transcription, "Show transcription on audience screen");
         ToolTip.SetTip(transcription, "Click to show transcription · Enter or Space when focused");
         transcription.Click += (_, _) => controller.Slideshow.SetShowing(false);
-        var showing = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeight.Medium };
+        var showing = new TextBlock { VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeight.Medium,
+            TextWrapping = TextWrapping.Wrap };
         void UpdateSource()
         {
             SlideshowControls.SetOutputState(transcription, "Transcription", !controller.Slideshow.IsShowing);
@@ -198,8 +240,11 @@ public sealed class SettingsWindow : Window
             _languageConsole, _languageStatus, _resetLanguages, _pause, _clear,
             Label("Caption size"), _size, pacing
         } };
-        var outputActions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8,
-            Children = { _demo, _fullscreen } };
+        var outputActions = new WrapPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right,
+            Children = { _demo, _recordings, _fullscreen } };
+        _demo.Margin = _recordings.Margin = new Thickness(0, 0, 8, 0);
+        _recordings.Click += async (_, _) => await OpenRecordingsAsync();
+        ToolTip.SetTip(_recordings, "Open daily audio folders. Captions record the full input locally as lossless FLAC; pause captions before sharing the latest file.");
         var outputStatus = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12,
             Children = { showing, PlaceInColumn(outputActions, 1) } };
         ToolTip.SetTip(_fullscreen, "Toggle display fullscreen");
@@ -215,9 +260,16 @@ public sealed class SettingsWindow : Window
             Content = new StackPanel { Spacing = 12, Children = {
                 Label("Audio input"),
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _audio, _refreshAudio } },
-                _audioAvailability, _microphone, Label("Appearance"), _lightMode,
+                _audioAvailability, _microphone,
+                Label("Audio recordings"),
+                new TextBlock { Text = "While captions run, the full input is saved locally as lossless FLAC in daily folders, split every 30 minutes. Pause captions before sharing the latest file. Recordings stay until you delete them; nothing is sent automatically.",
+                    TextWrapping = TextWrapping.Wrap, FontSize = 12 },
+                new SelectableTextBlock { Text = CaptionAudioRecorder.RecordingsDirectory, TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .75 },
+                Label("Appearance"), _lightMode,
                 _notice, _configuration,
-                new TextBlock { Text = "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
+                new TextBlock { Text = OperatingSystem.IsWindows()
+                    ? "This local file is a plaintext fallback, used when no environment variable or saved key is available. Save API key above stores an encrypted key instead."
+                    : "Keys load from this local file on launch. Keys entered above stay in memory until the app closes.",
                     TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .65 },
                 _configurationPath,
                 new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Children = { _openFile, _reloadFile } }
@@ -297,6 +349,27 @@ public sealed class SettingsWindow : Window
         Refresh();
     }
 
+    private Control SpeechTimingControl(Slider slider, string title, double minimum, double maximum,
+        Func<double> get, Action<double> set, string description)
+    {
+        slider.Minimum = minimum; slider.Maximum = maximum;
+        slider.TickFrequency = slider.SmallChange = .1; slider.LargeChange = .5;
+        slider.IsSnapToTickEnabled = true; slider.Value = get();
+        Avalonia.Automation.AutomationProperties.SetName(slider, title + ", seconds");
+        ToolTip.SetTip(slider, description);
+        var label = new TextBlock { Text = $"{title}: {get():0.0} s", FontWeight = FontWeight.Medium };
+        slider.PropertyChanged += (_, e) =>
+        {
+            if (e.Property != Slider.ValueProperty || !_controller.IsPaused) return;
+            set(slider.Value);
+            label.Text = $"{title}: {get():0.0} s";
+            _controller.SettingsChanged(); SchedulePreferencesSave();
+        };
+        return new StackPanel { Spacing = 6, Children = {
+            label, slider, new TextBlock { Text = description, TextWrapping = TextWrapping.Wrap, FontSize = 12 }
+        } };
+    }
+
     private Control LanguageSpeedControl(string language, Func<int?> get, Action<int?> set)
     {
         var useDefault = new CheckBox { Content = $"{language}: use default speed", IsChecked = get() is null };
@@ -329,6 +402,10 @@ public sealed class SettingsWindow : Window
         _gemini.Text = _controller.Settings.GeminiKey;
         _configurationPath.Text = _controller.Settings.ConfigurationPath;
         _diagnostic.Text = _controller.Settings.ConfigurationError ?? "";
+        if (OperatingSystem.IsWindows() && !_persistingKey && _controller.Settings.IsGoogleKeyFromConfiguration)
+            _keyStatus.Text = (_controller.Settings.GeminiKey.Length > 0
+                ? "API key loaded from configuration. Save API key stores an encrypted copy for your Windows account."
+                : "No API key is configured. Enter your key, then click Save API key to keep it for future launches.") + EnvironmentKeyNotice;
         _loading = false;
     }
 
@@ -378,12 +455,36 @@ public sealed class SettingsWindow : Window
         finally { _openingFile = false; if (!_closed) Refresh(); }
     }
 
+    private async Task OpenRecordingsAsync()
+    {
+        _recordings.IsEnabled = false;
+        try
+        {
+            var path = CaptionAudioRecorder.RecordingsDirectory;
+            await Task.Run(() => Directory.CreateDirectory(path));
+            if (_closed) return;
+            var info = new ProcessStartInfo { UseShellExecute = true };
+            if (OperatingSystem.IsMacOS())
+            {
+                info.FileName = "/usr/bin/open"; info.ArgumentList.Add(path);
+            }
+            else info.FileName = path;
+            using var process = Process.Start(info);
+        }
+        catch
+        {
+            if (!_closed) _controller.Errors.Add("Could not open recordings. Open the folder shown under Audio, appearance & configuration in your file manager and check folder access.");
+        }
+        finally { if (!_closed) _recordings.IsEnabled = true; }
+    }
+
     private async Task ReloadConfigurationAsync()
     {
         if (!_controller.IsPaused || _reloadingFile) return;
         _reloadingFile = true;
         var settings = _controller.Settings;
         var originalGoogle = settings.GeminiKey;
+        var originalRevision = settings.GoogleKeyRevision;
         var path = settings.ConfigurationPath;
         Refresh();
         _diagnostic.Text = "Reading local API configuration…";
@@ -391,12 +492,21 @@ public sealed class SettingsWindow : Window
         {
             // Reuse a blocked read rather than starting another on each click.
             if (_reloadRead is null || _reloadRead.IsCompleted || _reloadPath != path)
-            { _reloadPath = path; _reloadRead = Task.Run(() => new LocalConfiguration(path)); }
+            { _reloadPath = path; _reloadRevision = originalRevision; _reloadRead = Task.Run(() => new LocalConfiguration(path)); }
             var local = await _reloadRead.WaitAsync(TimeSpan.FromSeconds(5));
             if (_closed) return;
             if (local.Error is { } error)
-            { _diagnostic.Text = error; _controller.Errors.Add(error); return; }
-            settings.ApplyLocalConfiguration(local, originalGoogle);
+            {
+                // A broken encrypted key can still leave a usable environment/.env
+                // fallback. Keep the current key if no usable fallback was found.
+                if (local.GoogleKey.Length > 0)
+                {
+                    settings.ApplyLocalConfiguration(local, originalGoogle, _reloadRevision);
+                    _controller.NotifyLocalConfigurationLoaded();
+                }
+                _diagnostic.Text = error; _controller.Errors.Add(error); return;
+            }
+            settings.ApplyLocalConfiguration(local, originalGoogle, _reloadRevision);
             _controller.NotifyLocalConfigurationLoaded();
             _diagnostic.Text = "Local API configuration reloaded.";
         }
@@ -414,6 +524,43 @@ public sealed class SettingsWindow : Window
             { const string message = "Could not reload the local API configuration."; _diagnostic.Text = message; _controller.Errors.Add(message); }
         }
         finally { _reloadingFile = false; if (!_closed) Refresh(); }
+    }
+
+    private static string EnvironmentKeyNotice => LocalConfiguration.HasEnvironmentGoogleKey
+        ? " An environment API key is set; it takes priority over saved keys on startup and Reload file." : "";
+
+    private async Task PersistGoogleKeyAsync(bool remove)
+    {
+        if (!OperatingSystem.IsWindows() || !_controller.IsPaused || _persistingKey || _reloadingFile) return;
+        _persistingKey = true;
+        var settings = _controller.Settings;
+        settings.PreserveCurrentGoogleKey();
+        var key = settings.GeminiKey;
+        _keyStatus.Text = remove ? "Removing saved API key…" : "Saving encrypted API key…";
+        Refresh();
+        try
+        {
+            var error = await Task.Run(() => remove ? _savedGoogleKey.Remove() : _savedGoogleKey.Save(key));
+            if (_closed) return;
+            if (error is not null)
+            {
+                _keyStatus.Text = error;
+                _controller.Errors.Add(error);
+            }
+            else _keyStatus.Text = (remove
+                ? "Saved API key removed. The current key stays in memory until you close CapFast. Environment variables and the local file are still available on restart."
+                : "API key saved, encrypted for your Windows account. It will load on your next launch.") + EnvironmentKeyNotice;
+        }
+        catch
+        {
+            if (!_closed)
+            {
+                const string error = "Could not update the saved API key. Check access to your CapFast application data folder and try again. Your current key remains in memory.";
+                _keyStatus.Text = error;
+                _controller.Errors.Add(error);
+            }
+        }
+        finally { _persistingKey = false; if (!_closed) Refresh(); }
     }
 
     private async Task CheckMicrophoneAsync()
@@ -559,6 +706,8 @@ public sealed class SettingsWindow : Window
         if (_loading || !_controller.IsPaused) return;
         var settings = _controller.Settings;
         settings.GeminiKey = _gemini.Text ?? "";
+        if (OperatingSystem.IsWindows())
+            _keyStatus.Text = "Changes are in memory. Click Save API key to keep them for your next launch." + EnvironmentKeyNotice;
         _controller.SettingsChanged();
     }
     private void Refresh()
@@ -599,7 +748,9 @@ public sealed class SettingsWindow : Window
             pair.Value.IsEnabled = _controller.CanSetLanguageAssignment;
             Avalonia.Automation.AutomationProperties.SetName(pair.Value, $"{LanguageSurfaceRouting.Label(code)} {role.ToLowerInvariant()} — hint input language");
         }
-        _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile;
+        _openFile.IsEnabled = _reloadFile.IsEnabled = _controller.IsPaused && !_checkingMicrophone && !_reloadingFile && !_openingFile && !_persistingKey;
+        _saveKey.IsEnabled = _removeKey.IsEnabled = !_persistingKey && !_reloadingFile;
+        _gemini.IsEnabled = !_persistingKey;
         _microphone.IsEnabled = _controller.IsPaused && !_checkingMicrophone;
         _microphone.IsVisible = OperatingSystem.IsMacOS();
         _googleDescription.Text = "Every run starts in Auto. Each speech fragment is translated in its own language; the input indicator follows sustained language changes. English and Swahili captions share the left column; French stays on the right. Pending captions stay queued during slow requests. If translation cannot recover, capture pauses with an issue. Five seconds without speech returns to Detecting. A language click hints the next utterance.";

@@ -4,6 +4,8 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.14" />
+    <Compile Include="../../src/CapFast/Core/SavedGoogleKeyStore.cs" Link="SavedGoogleKeyStore.cs" />
     <Compile Include="../../src/CapFast/Core/LocalConfiguration.cs" Link="LocalConfiguration.cs" />
     <Compile Include="../../src/CapFast/Core/CaptionContentSafety.cs" Link="CaptionContentSafety.cs" />
     <Compile Include="../../src/CapFast/Core/LanguageSurfaceRouting.cs" Link="LanguageSurfaceRouting.cs" />
@@ -34,6 +36,8 @@
     <Compile Include="../../src/CapFast/Speech/SileroSpeechDetector.cs" Link="SileroSpeechDetector.cs" />
     <Compile Include="../../src/CapFast/Speech/PcmSpeechFramer.cs" Link="PcmSpeechFramer.cs" />
     <Compile Include="../../src/CapFast/Speech/WindowsAudioCapture.cs" Link="WindowsAudioCapture.cs" />
+    <Compile Include="../../src/CapFast/Speech/CaptionAudioRecorder.cs" Link="CaptionAudioRecorder.cs" />
+    <Compile Include="../../src/CapFast/Speech/FlacRecordingWriter.cs" Link="FlacRecordingWriter.cs" />
   </ItemGroup>
   <Import Project="../../AudioDependencies.props" />
 </Project>
