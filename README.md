@@ -2,7 +2,15 @@
 
 ![CapFast Settings and audience caption windows on a purple gradient background](docs/images/capfast-showcase.png)
 
-A small Avalonia/.NET desktop prototype for live seminar captions. Google transcription and translation detects each emitted speech segment’s input language and translates it into the other two among English, Swahili and French. Other input languages produce English and French. The audience window shows two caption surfaces on a dark or light background.
+CapFast is a multilingual transcription and captioning app for Windows and macOS. It lets speakers share a message naturally in their own language while others follow along with live, translated captions. A speaker can speak in Swahili while English and French speakers read along.
+
+Originally built for multilingual services in The Church of Jesus Christ of Latter-day Saints, CapFast can also be adapted for other church services that need real-time multilingual captions. The current workflow recognizes English, French, and Swahili and displays captions in the other two languages. Speech in other languages produces English and French captions.
+
+Built with Avalonia and .NET, the app currently uses Google Gemini AI services for transcription and translation. You supply your own Google API key. Usage costs have been low for our church services, though your costs will depend on how much you use it and Google's current API pricing.
+
+You're welcome to modify CapFast for your congregation's needs. If you'd like help getting it working for your own services, or want to suggest an improvement, [open a GitHub issue](https://github.com/twofingerrightclick/CapFast/issues).
+
+![Live multilingual captions projected during a church service](docs/images/capfast-church-service.png)
 
 ## Run on a Mac
 
